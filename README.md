@@ -1,5 +1,7 @@
 # KagSSH Go
 
+**Guía completa de instalación, Secrets y ejecución en Kaggle:** [USO_Y_CONFIGURACION.md](USO_Y_CONFIGURACION.md).
+
 Un solo binario Linux estático, sin dependencias de Python, OpenSSH Server ni cliente SSH en **Kaggle**. Incluye servidor SSH con shell/PTY/SFTP y cliente SSH para publicar un túnel inverso en tu VPS.
 
 ## Arranque sin exports desde Kaggle Secrets
