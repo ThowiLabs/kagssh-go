@@ -11,6 +11,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,7 @@ type request struct {
 type rpcError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 type response struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -194,8 +196,31 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 
 // ServeHTTP mantiene el handshake heredado y también admite MCP 2026-07-28
 // stateless. OAuth se valida antes de procesar métodos o herramientas.
+// acceptedMCPOrigin checks the browser Origin while allowing the known ChatGPT
+// clients. A tunnel or ChatGPT client can supply a different Origin than the
+// public URL; arbitrary websites must still be rejected (MCP DNS-rebinding rule).
+func acceptedMCPOrigin(raw, public string) bool {
+	if raw == "" {
+		return true
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil ||
+		u.Opaque != "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	switch raw {
+	case "https://chatgpt.com", "https://chat.openai.com", "https://www.chatgpt.com":
+		return true
+	}
+	hostURL, err := url.Parse(public)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == hostURL.Scheme && u.Host == hostURL.Host
+}
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if origin := r.Header.Get("Origin"); origin != "" && origin != s.public {
+	if !acceptedMCPOrigin(r.Header.Get("Origin"), s.public) {
+		slog.Warn("MCP rechazado", "reason", "origin_not_allowed", "http_status", http.StatusForbidden)
 		http.Error(w, "Origin no permitido", http.StatusForbidden)
 		return
 	}
@@ -205,12 +230,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.auth.ValidateBearer(r); err != nil {
+		slog.Warn("MCP rechazado", "reason", "bearer_invalid", "http_status", http.StatusUnauthorized)
 		w.Header().Set("WWW-Authenticate", s.auth.WWWAuthenticate("invalid_token", "autorización requerida"))
 		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
 		return
 	}
+	if origin := r.Header.Get("Origin"); origin != "" && origin != s.public {
+		slog.Info("MCP con Origin de cliente confiable diferente al túnel", "origin_present", true)
+	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
+		slog.Warn("MCP rechazado", "reason", "content_type", "http_status", http.StatusUnsupportedMediaType)
 		http.Error(w, "Content-Type debe ser application/json", http.StatusUnsupportedMediaType)
 		return
 	}
@@ -219,15 +249,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(body)
 	var req request
 	if err := dec.Decode(&req); err != nil {
-		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", Error: &rpcError{-32700, "JSON no válido"}})
+		slog.Warn("MCP rechazado", "reason", "json_parse", "http_status", http.StatusBadRequest)
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", Error: &rpcError{Code: -32700, Message: "JSON no válido"}})
 		return
 	}
 	if dec.Decode(new(any)) != io.EOF {
-		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32600, "se admite un mensaje JSON-RPC por solicitud"}})
+		slog.Warn("MCP rechazado", "reason", "extra_json", "http_status", http.StatusBadRequest)
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "se admite un mensaje JSON-RPC por solicitud"}})
 		return
 	}
 	if req.JSONRPC != "2.0" || req.Method == "" {
-		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32600, "petición inválida"}})
+		slog.Warn("MCP rechazado", "reason", "invalid_rpc", "http_status", http.StatusBadRequest)
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32600, Message: "petición inválida"}})
 		return
 	}
 	// La versión se negocia por petición; la URL MCP no mantiene sesiones.
@@ -240,14 +273,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch version {
 	case "", protocol, "2025-03-26", modernProtocol:
 	default:
-		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32022, "versión MCP no compatible"}})
+		slog.Warn("MCP descubrimiento rechazado", "method", req.Method, "reason", "protocol_version_unsupported", "http_status", http.StatusBadRequest)
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32022, Message: "Unsupported protocol version", Data: map[string]any{"supported": []string{modernProtocol, protocol, "2025-03-26"}, "requested": version}}})
 		return
 	}
 	if modern {
 		// MCP 2026-07-28 exige coherencia entre las cabeceras espejadas y
 		// los datos del mensaje. Nunca confiamos en un header sin compararlo.
 		if r.Header.Get("Mcp-Method") != req.Method {
-			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32020, "Mcp-Method no coincide con el cuerpo"}})
+			slog.Warn("MCP descubrimiento rechazado", "method", req.Method, "reason", "mcp_method_header_mismatch", "http_status", http.StatusBadRequest)
+			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32020, Message: "Mcp-Method no coincide con el cuerpo"}})
 			return
 		}
 		var params struct {
@@ -258,16 +293,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} `json:"_meta"`
 		}
 		if len(req.Params) == 0 || json.Unmarshal(req.Params, &params) != nil || params.Meta.Protocol != modernProtocol || len(params.Meta.Capabilities) == 0 {
-			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32020, "metadata MCP 2026 ausente o no coincide con MCP-Protocol-Version"}})
+			slog.Warn("MCP descubrimiento rechazado", "method", req.Method, "reason", "modern_meta_missing_or_mismatch", "http_status", http.StatusBadRequest)
+			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32020, Message: "metadata MCP 2026 ausente o no coincide con MCP-Protocol-Version"}})
 			return
 		}
 		if req.Method == "tools/call" && (params.Name == "" || r.Header.Get("Mcp-Name") != params.Name) {
-			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32020, "Mcp-Name no coincide con la herramienta"}})
+			slog.Warn("MCP llamada rechazada", "reason", "mcp_name_header_mismatch", "http_status", http.StatusBadRequest)
+			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32020, Message: "Mcp-Name no coincide con la herramienta"}})
 			return
 		}
 	} else if req.Method == "server/discover" {
 		// La versión 2025-11-25 no define server/discover.
-		s.rpc(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32601, "Method not found"}})
+		s.rpc(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32601, Message: "Method not found"}})
 		return
 	}
 	// Las notificaciones nunca tienen ID; no se emite un objeto JSON-RPC.
@@ -297,7 +334,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		out := map[string]any{"tools": s.definitions()}
+		defs := s.definitions()
+		slog.Info("MCP herramientas disponibles", "count", len(defs), "protocol", version)
+		out := map[string]any{"tools": defs}
 		if modern {
 			out["resultType"] = "complete"
 			out["ttlMs"] = 30000
@@ -310,7 +349,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Arguments json.RawMessage `json:"arguments"`
 		}
 		if err := json.Unmarshal(req.Params, &call); err != nil || call.Name == "" {
-			resp.Error = &rpcError{-32602, "tools/call requiere name y arguments"}
+			resp.Error = &rpcError{Code: -32602, Message: "tools/call requiere name y arguments"}
 		} else {
 			out, err := s.invoke(r.Context(), call.Name, call.Arguments)
 			resp.Result = toolResult(out, err)
@@ -319,7 +358,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	default:
-		resp.Error = &rpcError{-32601, "método desconocido"}
+		resp.Error = &rpcError{Code: -32601, Message: "método desconocido"}
+	}
+	if req.Method == "server/discover" || req.Method == "initialize" || req.Method == "tools/list" {
+		slog.Info("MCP respuesta de descubrimiento", "method", req.Method, "protocol", version, "http_status", 200)
 	}
 	s.rpc(w, resp)
 }

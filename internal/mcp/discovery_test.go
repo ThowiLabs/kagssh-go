@@ -284,3 +284,76 @@ func TestModernRequestHeaderAndMethodValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestActionDiscoveryWithBearerAndRewrittenOrigin(t *testing.T) {
+	srv := newTestServer(t)
+	token := issueAccessTokenForTest(t, srv)
+	for _, origin := range []string{"", "https://chatgpt.com", "https://chat.openai.com", "https://www.chatgpt.com", "https://sample.trycloudflare.com"} {
+		for _, protocolVersion := range []string{protocol, modernProtocol} {
+			t.Run(origin+"_"+protocolVersion, func(t *testing.T) {
+				for _, method := range []string{"server/discover", "tools/list"} {
+					if method == "server/discover" && protocolVersion != modernProtocol {
+						continue
+					}
+					params := map[string]any{}
+					if protocolVersion == modernProtocol {
+						params = modernParams(nil)
+					}
+					body, e := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 17, "method": method, "params": params})
+					if e != nil {
+						t.Fatal(e)
+					}
+					req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(string(body)))
+					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("Accept", "application/json, text/event-stream")
+					req.Header.Set("Authorization", "Bearer "+token)
+					req.Header.Set("Origin", origin)
+					req.Header.Set("MCP-Protocol-Version", protocolVersion)
+					if protocolVersion == modernProtocol {
+						req.Header.Set("Mcp-Method", method)
+					}
+					response := httptest.NewRecorder()
+					srv.Handler().ServeHTTP(response, req)
+					if response.Code != 200 {
+						t.Fatalf("origin=%q method=%s HTTP%d: %s", origin, method, response.Code, response.Body.String())
+					}
+					var decoded struct {
+						Result map[string]json.RawMessage `json:"result"`
+					}
+					if err := json.Unmarshal(response.Body.Bytes(), &decoded); err != nil {
+						t.Fatal(err)
+					}
+					key := "tools"
+					if method == "server/discover" {
+						key = "supportedVersions"
+					}
+					if len(decoded.Result[key]) == 0 {
+						t.Fatalf("falta %s en %s", key, response.Body.String())
+					}
+				}
+			})
+		}
+	}
+}
+func TestActionDiscoveryRejectsMissingOrBadBearerRegardlessOfOrigin(t *testing.T) {
+	srv := newTestServer(t)
+	for _, origin := range []string{"", "https://chatgpt.com", "https://sample.trycloudflare.com"} {
+		for _, authorization := range []string{"", "Bearer wrong-token"} {
+			body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
+			req := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", origin)
+			if authorization != "" {
+				req.Header.Set("Authorization", authorization)
+			}
+			resp := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(resp, req)
+			if resp.Code != http.StatusUnauthorized {
+				t.Fatalf("origin=%q token=%q status=%d", origin, authorization, resp.Code)
+			}
+			if strings.Contains(resp.Body.String(), "tools") {
+				t.Fatal("herramientas reveladas sin Bearer")
+			}
+		}
+	}
+}

@@ -309,3 +309,21 @@ Ejemplos para agentes MCP:
 En runtimes con varios agentes, la GPU puede estar compartida: `gpu_processes` muestra los procesos de cómputo accesibles a `nvidia-smi` del entorno, **no atribuye propiedad ni permisos al agente que los creó**. Las herramientas nunca matan procesos, cambian potencia, hacen overclock o escriben archivos. No existe un monitor residente ni se crea historial permanente en disco.
 
 Se probó localmente la lógica contra respuestas simuladas de 2 Tesla T4, ausencia de `nvidia-smi`, errores del driver, mediciones N/A, varias aplicaciones y cancelación del monitor. El consumo real de una GPU Kaggle requiere probar el notebook con Accelerator GPU activado.
+
+## Diagnóstico: OAuth correcto pero descubrimiento de herramientas fallido
+
+Si ChatGPT indica `Authentication succeeded, action discovery failed`, el intercambio OAuth pudo haber terminado bien mientras la solicitud posterior de `/mcp` (por ejemplo `server/discover` o `tools/list`) fue rechazada.
+
+Se identificó en código una causa **probable**: `internal/mcp/server.go` exigía que `Origin` fuese **idéntico** a la URL pública del túnel antes de validar el Bearer token. Los clientes ChatGPT pueden enviar `Origin: https://chatgpt.com` o `https://chat.openai.com`, mientras Gradio/Cloudflare utilizan otra URL. Esto bloqueaba el descubrimiento con HTTP 403 aun teniendo una autorización OAuth válida. Los mensajes `login recibido a través de proxy con Origin diferente` son **informativos del panel** y no demuestran un fallo de PIN ni de OAuth.
+
+**Corrección:** el endpoint `/mcp` conserva la validación obligatoria de `Origin` para prevenir DNS rebinding, pero permite únicamente (a) ausencia de cabecera, habitual en clientes no navegador; (b) el origen de la URL pública del túnel; y (c) los orígenes conocidos `https://chatgpt.com`, `https://chat.openai.com` y `https://www.chatgpt.com`. Todo origen ajeno se rechaza con HTTP 403. Todas las solicitudes MCP válidas requieren además un Bearer OAuth vigente. El dashboard conserva su cookie y CSRF independientes.
+
+La respuesta a una versión MCP desconocida ahora incluye `error.data.supported` y `error.data.requested`, permitiendo al cliente negociar con `2026-07-28` o `2025-11-25` en vez de quedarse sin alternativa.
+
+**Logs de diagnóstico sin secretos:** una conexión válida debe mostrar `descubrimiento MCP method=server/discover` o `method=tools/list`, seguido de `MCP respuesta de descubrimiento ... http_status=200` y `MCP herramientas disponibles count=42`. En caso de rechazo, `MCP rechazado reason=origin_not_allowed` indica un Origin distinto del permitido; `bearer_invalid` indica token inválido; `content_type` el tipo HTTP; `mcp_method_header_mismatch`, `modern_meta_missing_or_mismatch` o `protocol_version_unsupported` señalan las condiciones concretas del protocolo moderno. No se registran PIN, Bearer tokens, cookies, cuerpos de peticiones ni valores íntegros de la cabecera Origin.
+
+**Cómo volver a probar en Kaggle:** detener la celda `run`, ejecutar `clonar → compilar → configurar → validación → run` con la URL pública actual. Si `pin = ""`, Go genera un PIN nuevo al reiniciar. En ChatGPT, utiliza la nueva URL `https://...gradio.live/mcp` o `https://...trycloudflare.com/mcp`, vuelve a conectar si cambió la URL, y autoriza con el PIN vigente. El log `panel_web` es para el navegador; `url` termina en `/mcp` y es la dirección de la conexión ChatGPT.
+
+Se probaron los métodos de descubrimiento 2026 y 2025 a través de un reverse proxy HTTP real simulado con `Origin: https://chatgpt.com`, token OAuth conseguido mediante PKCE, esquemas de todas las herramientas y negociación de versiones. **Sin ensayo real de tu sesión Kaggle o ChatGPT** no puede afirmarse que ese haya sido el único factor de la incidencia.
+
+Referencia de implementación: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
