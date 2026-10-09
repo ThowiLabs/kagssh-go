@@ -143,11 +143,17 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	provider := "externo"
 	var tunnel publicTunnel
 	if cfg.MCPTunnel != "none" {
-		public, tunnel, provider, err = startTunnel(ctx, cfg.MCPTunnel, cfg.MCPGradioRetries, cfg.MCPPort, "http://"+addr, bridge.nonce, log)
+		public, tunnel, provider, err = startTunnelWithRetry(ctx, func(c context.Context) (string, publicTunnel, string, error) {
+			return startTunnel(c, cfg.MCPTunnel, cfg.MCPGradioRetries, cfg.MCPPort, "http://"+addr, bridge.nonce, log)
+		}, sleepContext, log)
 		if err != nil {
 			return fmt.Errorf("establecer túnel HTTPS: %w", err)
 		}
-		defer tunnel.Close()
+		defer func() {
+			if tunnel != nil {
+				_ = tunnel.Close()
+			}
+		}()
 	}
 	if public == "" {
 		return errors.New("falta URL pública del servidor MCP")
@@ -162,6 +168,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		server.generatedPIN = ""
 	}
 	log.Info("KagMCP listo para conectar cliente MCP", "url", public+"/mcp", "panel_web", public+"/", "tunnel", provider, "github_token_configurado", cfg.GitHubToken != "")
+	writeCurrentTunnelStatus(cfg, public, provider, "online", log)
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -183,14 +190,56 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			}
 		}
 	}()
-	select {
-	case err = <-serveDone:
-		if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+	if cfg.MCPTunnel == "none" {
+		select {
+		case err = <-serveDone:
+			if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("servidor HTTP MCP: %w", err)
+		case <-ctx.Done():
 			return nil
 		}
-		return fmt.Errorf("servidor HTTP MCP: %w", err)
-	case <-ctx.Done():
-		return nil
+	}
+	for {
+		watchCtx, stopWatch := context.WithCancel(ctx)
+		watchDone := make(chan error, 1)
+		go func(current publicTunnel, url string) {
+			watchDone <- watchPublicTunnel(watchCtx, current, url, bridge.nonce, tunnelCheckInterval, tunnelFailureThreshold, healthCheck, log)
+		}(tunnel, public)
+		select {
+		case err = <-serveDone:
+			stopWatch()
+			if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("servidor HTTP MCP: %w", err)
+		case <-ctx.Done():
+			stopWatch()
+			writeCurrentTunnelStatus(cfg, public, provider, "closed", log)
+			return nil
+		case err = <-watchDone:
+			stopWatch()
+			if ctx.Err() != nil {
+				return nil
+			}
+			log.Error("túnel público MCP desconectado; recuperando sesión", "provider", provider, "url_anterior", public, "reason", err)
+			writeCurrentTunnelStatus(cfg, public, provider, "reconnecting", log)
+			bridge.Set(nil)
+			_ = tunnel.Close()
+			current := server
+			launch := func(c context.Context) (string, publicTunnel, string, error) {
+				return startTunnel(c, cfg.MCPTunnel, cfg.MCPGradioRetries, cfg.MCPPort, "http://"+addr, bridge.nonce, log)
+			}
+			server, public, tunnel, provider, err = recoverPublicTunnel(ctx, cfg, current, bridge, launch, sleepContext, log)
+			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return fmt.Errorf("restaurar túnel público: %w", err)
+			}
+			writeCurrentTunnelStatus(cfg, public, provider, "online", log)
+		}
 	}
 }
 

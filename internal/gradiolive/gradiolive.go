@@ -31,6 +31,8 @@ type Tunnel struct {
 	cancel   context.CancelFunc
 	finished chan struct{}
 	once     sync.Once
+	errMu    sync.RWMutex
+	lastErr  error
 }
 
 func (t *Tunnel) Close() error {
@@ -50,6 +52,17 @@ func (t *Tunnel) Done() <-chan struct{} {
 		return nil
 	}
 	return t.finished
+}
+
+// Err explains an unexpected native FRP session termination after Done closes.
+// This never exposes credentials or the random proxy name.
+func (t *Tunnel) Err() error {
+	if t == nil {
+		return nil
+	}
+	t.errMu.RLock()
+	defer t.errMu.RUnlock()
+	return t.lastErr
 }
 
 var gradioURL = regexp.MustCompile(`^https://[a-zA-Z0-9-]+\.gradio\.live/?$`)
@@ -130,12 +143,16 @@ func Start(ctx context.Context, localPort int) (*Tunnel, error) {
 	tunnel := &Tunnel{cancel: cancel, finished: make(chan struct{})}
 	go func() {
 		defer close(tunnel.finished)
-		result <- runNativeFRPSession(runCtx, info, localPort, proxy, func(link string) {
+		err := runNativeFRPSession(runCtx, info, localPort, proxy, func(link string) {
 			select {
 			case ready <- link:
 			default:
 			}
 		})
+		tunnel.errMu.Lock()
+		tunnel.lastErr = err
+		tunnel.errMu.Unlock()
+		result <- err
 	}()
 	timer := time.NewTimer(startupTimeout)
 	defer timer.Stop()

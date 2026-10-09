@@ -327,3 +327,20 @@ La respuesta a una versión MCP desconocida ahora incluye `error.data.supported`
 Se probaron los métodos de descubrimiento 2026 y 2025 a través de un reverse proxy HTTP real simulado con `Origin: https://chatgpt.com`, token OAuth conseguido mediante PKCE, esquemas de todas las herramientas y negociación de versiones. **Sin ensayo real de tu sesión Kaggle o ChatGPT** no puede afirmarse que ese haya sido el único factor de la incidencia.
 
 Referencia de implementación: https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http
+
+## Supervisión y autorrecuperación de Gradio Live y Cloudflare
+
+Desde la revisión de reconexión de octubre 2026, KagMCP ya no deja indefinidamente una dirección `gradio.live` publicada pero inservible. La mejora se inspiró en la implementación madura del cliente FRP nativo de `Goradio/gradio_native.go`, consultada **solo en lectura**, sin modificar Goradio.
+
+**Qué vigila ahora KagMCP**
+1. La vida del cliente nativo FRP / proceso de Cloudflare: si termina el canal de control, detecta el cierre y reconecta inmediatamente.
+2. La salud de la **URL HTTPS pública**, no solo el servicio HTTP local: revisa cada **20 segundos** `/api/health` y exige recibir el nonce criptográfico de esta ejecución, sin seguir redirecciones. Tras **5 fallos consecutivos** (aproximadamente 100 segundos si no responde) declara el enlace caído, cancela el túnel e intenta otro. Los fallos intermitentes se reinician a cero tras una respuesta válida.
+3. Si Gradio queda inservible, con `MCP_TUNNEL=auto` los reintentos seleccionan Gradio primero y después recurren a Cloudflare según `GRADIO_RETRIES`; `gradio` explícito no cambia de proveedor, ni `cloudflare` explícito activa Gradio. Los fallos posteriores a startup y los de arranque se reintentan con backoff **1, 2, 4, 8, 16 segundos** hasta recuperar enlace o detener `run`. No crea un proceso FRP externo: sigue siendo Go nativo.
+4. Al renovar la URL, desactiva temporalmente las rutas del panel/OAuth hasta validar el túnel nuevo, reutiliza **el mismo PIN (incluso si fue cambiado en el panel)**, memoria, proyectos, tareas, skills y cliente PAT GitHub configurado. Regenera el servidor OAuth para la URL actual; los tokens de la URL antigua se invalidan en el cambio de identidad.
+5. Se registran la caída, motivo FRP/health, intentos, proveedor y `url=https://.../mcp` nueva. La URL actual también queda en el archivo local privado `/kaggle/working/.kagmcp/state/tunnel-status.json`, junto a `provider`, `status` y `updated_at`. No hay PIN ni PAT ni tokens en ese archivo.
+
+**Limitación importante de Gradio Live:** la nueva URL pública puede ser **distinta**. Ni el cliente FRP ni KagMCP pueden conservar una dirección `xxxxx.gradio.live` previamente asignada cuando el servidor externo la retira. **ChatGPT no se reconecta automáticamente a un hostname distinto.** Cuando el log diga `KagMCP restablecido con URL pública nueva; vuelve a conectar y autorizar ChatGPT`, actualiza la dirección MCP en ChatGPT y vuelve a autorizar mediante el PIN vigente. El servidor de Kaggle sigue encendido y sus proyectos no se borran. Para evitar esta interrupción de la configuración de ChatGPT, utiliza un proxy o dominio HTTPS **estable propio** con `MCP_TUNNEL=none` y `MCP_PUBLIC_URL` configurada correctamente; los enlaces gratuitos temporales no garantizan continuidad.
+
+Un corte prolongado de Internet puede dejar el servicio MCP local funcionando sin URL pública hasta que haya conectividad; los reintentos continúan mientras la celda `run` esté activa. Este supervisor no sustituye el tiempo máximo de sesión o la suspensión del propio entorno Kaggle.
+
+**Pruebas locales:** canal FRP cerrado, salud fallando de forma consecutiva, recuperación tras fallos intermitentes, backoff y cancelación, nueva URL OAuth, revocación de token antiguo, uso del PIN cambiado para un nuevo OAuth, conservación del PAT y de proyectos y publicación del estado privado. Aún falta una medición real continua durante horas desde una instancia Kaggle y una conexión ChatGPT.
