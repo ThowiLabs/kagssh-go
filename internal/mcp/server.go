@@ -25,7 +25,6 @@ import (
 	"github.com/ThowiLabs/kagssh-go/internal/oauth"
 	"github.com/ThowiLabs/kagssh-go/internal/pinauth"
 	"github.com/ThowiLabs/kagssh-go/internal/projectstate"
-	"github.com/ThowiLabs/kagssh-go/internal/quicktunnel"
 	"github.com/ThowiLabs/kagssh-go/internal/securefs"
 	"github.com/ThowiLabs/kagssh-go/internal/skills"
 	"sync"
@@ -116,15 +115,36 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return fmt.Errorf("escuchar MCP: %w", err)
 	}
 	defer ln.Close()
+	// Se sirve únicamente /api/health hasta validar que el túnel
+	// anunciado realmente llega a esta sesión. OAuth aún no se expone.
+	bridge, err := newProbeHandler()
+	if err != nil {
+		return err
+	}
+	httpServer := &http.Server{
+		Handler: bridge, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 60 * time.Second,
+		WriteTimeout: 65 * time.Second, IdleTimeout: 75 * time.Second, MaxHeaderBytes: 16 << 10,
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- httpServer.Serve(ln) }()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+		select {
+		case <-serveDone:
+		case <-time.After(5 * time.Second):
+		}
+	}()
 	public := cfg.MCPPublicURL
-	var tunnel *quicktunnel.Tunnel
-	if cfg.MCPTunnel == "cloudflare" {
-		tunnel, err = quicktunnel.Start(ctx, "http://"+addr)
+	provider := "externo"
+	var tunnel publicTunnel
+	if cfg.MCPTunnel != "none" {
+		public, tunnel, provider, err = startTunnel(ctx, cfg.MCPTunnel, cfg.MCPGradioRetries, cfg.MCPPort, "http://"+addr, bridge.nonce, log)
 		if err != nil {
-			return fmt.Errorf("crear URL HTTPS Cloudflare: %w", err)
+			return fmt.Errorf("establecer túnel HTTPS: %w", err)
 		}
 		defer tunnel.Close()
-		public = tunnel.URL
 	}
 	if public == "" {
 		return errors.New("falta URL pública del servidor MCP")
@@ -133,20 +153,12 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	bridge.Set(server.Handler())
 	if server.generatedPIN != "" {
 		log.Warn("PIN temporal generado por Go; úsalo para el panel y OAuth, cambia el PIN desde el panel si deseas", "pin_temporal", server.generatedPIN)
-		server.generatedPIN = "" // Mostrarlo una sola vez y no retener una segunda copia en Server.
+		server.generatedPIN = ""
 	}
-	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout: 60 * time.Second, WriteTimeout: 65 * time.Second, IdleTimeout: 75 * time.Second,
-		MaxHeaderBytes: 16 << 10}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(shutdownCtx)
-	}()
-	log.Info("KagMCP listo para conectar cliente MCP", "url", public+"/mcp", "panel_web", public+"/", "tunnel", cfg.MCPTunnel, "github_token_configurado", cfg.GitHubToken != "")
-	// Vigilar el almacenamiento durante toda la vida del runtime.
+	log.Info("KagMCP listo para conectar cliente MCP", "url", public+"/mcp", "panel_web", public+"/", "tunnel", provider, "github_token_configurado", cfg.GitHubToken != "")
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
@@ -156,32 +168,27 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				err := diskguard.Check("/kaggle/working")
-				if err != nil && !warned {
-					log.Error("espacio crítico: detener instalaciones/escrituras", "error", err)
+				e := diskguard.Check("/kaggle/working")
+				if e != nil && !warned {
+					log.Error("espacio crítico: detener instalaciones/escrituras", "error", e)
 					warned = true
 				}
-				if err == nil && warned {
+				if e == nil && warned {
 					log.Info("espacio de trabajo recuperado")
 					warned = false
 				}
 			}
 		}
 	}()
-	stopped := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = httpServer.Close()
-		case <-stopped:
+	select {
+	case err = <-serveDone:
+		if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+			return nil
 		}
-	}()
-	defer close(stopped)
-	err = httpServer.Serve(ln)
-	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+		return fmt.Errorf("servidor HTTP MCP: %w", err)
+	case <-ctx.Done():
 		return nil
 	}
-	return err
 }
 
 // ServeHTTP mantiene el handshake heredado y también admite MCP 2026-07-28

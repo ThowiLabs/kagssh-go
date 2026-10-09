@@ -30,7 +30,8 @@ En la celda Python:
 ```python
 MCP_ENABLED = True
 SSH_ENABLED = False
-MCP_TUNNEL = "cloudflare"
+MCP_TUNNEL = "auto"  # Gradio → Cloudflare en caso de fallos
+GRADIO_RETRIES = 3
 MCP_LISTEN_PORT = 8181
 USE_GITHUB = False
 ```
@@ -94,7 +95,7 @@ Configura esa URL como servidor MCP remoto en el cliente compatible. El servidor
 
 Durante la autorización, introduce el **PIN MCP** para permitir que ese cliente ejecute las herramientas. Acepta PKCE S256 y el descubrimiento moderno de clientes soportado por el módulo OAuth de Lilith.
 
-El tráfico HTTPS termina en Cloudflare; el origen de KagMCP se expone en loopback y no se publica directamente en `0.0.0.0`. Ese modo de escucha es **independiente** del bind público solicitado al VPS para SSH.
+El tráfico HTTPS llega a través de Gradio FRP o Cloudflare; el origen de KagMCP se expone en loopback y no se publica directamente en `0.0.0.0`. Ese modo de escucha es **independiente** del bind público solicitado al VPS para SSH.
 
 ## 5. Herramientas de Kaggle
 
@@ -111,7 +112,9 @@ Los datasets de `/kaggle/input` son de solo lectura. Las herramientas de archivo
 
 ## 6. Otros túneles
 
-- **`MCP_TUNNEL=cloudflare` (implementado):** túnel temporal Cloudflare con URL HTTPS pública automática; requiere conectividad saliente y la descarga verificada del conector.
+- **`MCP_TUNNEL=auto` (predeterminado):** Gradio FRP TLS prioritario y fallback a Cloudflare después de los intentos configurados.
+- **`MCP_TUNNEL=gradio` (estricto):** URL Gradio sin Cloudflare de respaldo.
+- **`MCP_TUNNEL=cloudflare` (estricto):** túnel temporal Cloudflare con URL HTTPS pública automática; requiere conectividad saliente y la descarga verificada del conector.
 - **`MCP_TUNNEL=none` (implementado):** KagMCP escucha en loopback. Configura `MCP_PUBLIC_URL=https://dominio-propio` y un proxy externo que reenvíe HTTPS hacia el puerto local.
 - **`localhost.run` (pendiente):** servicio basado en SSH; su integración interna exigirá verificar la identidad del servidor y descubrir la URL publicada sin guardar contraseñas ni romper el binario único.
 
@@ -157,8 +160,8 @@ La salida del binario registra `descubrimiento MCP` con el nombre de los método
 En la salida de la celda `run` se mostrarán:
 
 ```text
-url=https://subdominio.trycloudflare.com/mcp
-panel_web=https://subdominio.trycloudflare.com/
+url=https://subdominio.gradio.live/mcp
+panel_web=https://subdominio.gradio.live/
 ```
 
 La segunda URL abre la administración del servidor. Usa **el PIN MCP introducido en la celda configurar**. Después del login puedes crear proyectos (ID igual al nombre de su carpeta bajo `/kaggle/working`), consultar sus notas, crear/cambiar tareas, leer historial, recorrer Ponytail v2 y configurar o borrar el PAT de GitHub sin almacenarlo en disco.
@@ -210,3 +213,25 @@ Una marca `tests_passed=true` escrita por un agente **ya no es suficiente** para
 Ejemplo de verificación: `test_command="python -m pytest -q"`, `notebook_command="python -m jupyter nbconvert --to notebook --execute notebooks/run.ipynb --output-dir /tmp --output kagmcp-verificado.ipynb"`. Ajusta las opciones para no escribir dentro del repositorio durante las pruebas. El servidor valida éxito técnico, no garantiza que los tests elegidos cubran los casos esenciales.
 
 El panel `/` muestra el estado de verificación y dispone de **Restaurar memoria** desde el contexto JSON que previamente exportaste y versionaste. Importar nunca supone pruebas realizadas en esta nueva sesión.
+
+## Selección de túneles HTTP (Gradio primero, Cloudflare de respaldo)
+
+Por defecto el notebook pasa `MCP_TUNNEL="auto"` y `MCP_GRADIO_RETRIES=3`, con este orden:
+
+1. El binario Go consulta la API oficial `https://api.gradio.app/v3/tunnel-request`, descarga FRP v0.3 del CDN oficial de Hugging Face **solo si no existe en caché** y verifica su SHA-256 fijado (actualización explícita, nunca automática). No instala el paquete Python Gradio.
+2. Arranca el servidor HTTP local `127.0.0.1:8181` para ofrecer una prueba temporal `/api/health`, después inicia FRP, obtiene la URL `https://<aleatorio>.gradio.live` y verifica por HTTPS que dicha ruta responde el desafío único de **este proceso KagMCP**.
+3. Si no se pudo abrir el enlace o la ruta pública no responde, cierra FRP y repite hasta tres intentos (editable 1–5). Si todos fallan, utiliza automáticamente **cloudflared**, verificando también que su URL publique el mismo proceso. En los logs se muestra qué proveedor se eligió.
+4. Una vez confirmada la URL, activa OAuth y el panel web. El log anuncia `url=https://.../mcp` y `panel_web=https://.../`.
+
+| Variable `MCP_TUNNEL` | Comportamiento |
+|---|---|
+| `auto` (predeterminado) | Gradio primero; Cloudflare al agotar los intentos |
+| `gradio` | Solo Gradio; tras agotar intentos, devuelve error sin cambiar a Cloudflare |
+| `cloudflare` | Solo Cloudflare, sin iniciar FRP |
+| `none` | Sin túnel integrado; requiere proxy HTTPS propio y `MCP_PUBLIC_URL` |
+
+En el notebook, `GRADIO_RETRIES=3` se traduce a `MCP_GRADIO_RETRIES=3`. Si necesitas otra cifra, configura entre 1 y 5. **No** utilices `gradio` si deseas que cambie de proveedor automáticamente: usa `auto`.
+
+El túnel Gradio utiliza los ejecutables oficiales FRP v0.3 y verifica sus checksums del código del proyecto Gradio, como `frpc_linux_amd64` (SHA-256 `c791d1f047b41ff5885772fc4bf20b797c6059bbd82abb9e31de15e55d6a57c4`). Los ejecutables se guardan en una caché privada de `/kaggle/working/.kagmcp/cache/kagmcp/frp-v0.3/`. El TLS hacia el servidor FRP se verifica con el certificado CA de la API oficial.
+
+**Aclaración:** compartir el servidor Go de KagMCP a través de `gradio.live` **no crea una interfaz de Gradio en Python**. El panel sigue siendo Go, las herramientas siguen siendo MCP y OAuth/PIN siguen protegiendo las rutas administrativas. Las URL temporales pueden caducar o interrumpirse; una caída *posterior* a la conexión no cambia silenciosamente la URL OAuth del cliente ya vinculado. Si el túnel muere después del arranque, reinicia la celda y vuelve a conectar el cliente si cambió el enlace. No compartas el PIN ni los logs que lo incluyen.

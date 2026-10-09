@@ -20,7 +20,7 @@ var names = []string{
 	"SSH_KNOWN_HOSTS", "SSH_PORT_REMOTE", "SSH_PORT_KAGGLE", "SSH_PORT_LOCAL",
 	"SSH_LOGIN_USER", "SSH_LOGIN_PASSWORD",
 	"SSH_AUTHORIZED_KEYS", "SSH_HOST_KEY",
-	"MCP_ENABLED", "MCP_TUNNEL", "MCP_PUBLIC_URL", "MCP_LISTEN_PORT", "MCP_ACCESS_PIN",
+	"MCP_ENABLED", "MCP_TUNNEL", "MCP_GRADIO_RETRIES", "MCP_PUBLIC_URL", "MCP_LISTEN_PORT", "MCP_ACCESS_PIN",
 	"SSH_ENABLED", "GITHUB_TOKEN",
 }
 
@@ -30,7 +30,7 @@ type Config struct {
 	VPSPort, RemotePort                                                  int
 	Retry                                                                time.Duration
 	SSHEnabled, MCPEnabled                                               bool
-	MCPPort                                                              int
+	MCPPort, MCPGradioRetries                                            int
 	MCPTunnel, MCPPublicURL, MCPAccessPIN, GitHubToken, DataDir          string
 }
 
@@ -119,6 +119,13 @@ func parse(v map[string]string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	retries := 3
+	if raw, ok := v["MCP_GRADIO_RETRIES"]; ok {
+		retries, err = strconv.Atoi(raw)
+		if err != nil || retries < 1 || retries > 5 {
+			return Config{}, errors.New("MCP_GRADIO_RETRIES debe estar entre 1 y 5")
+		}
+	}
 	mcpEnabled, err := strconv.ParseBool(value("MCP_ENABLED", "false"))
 	if err != nil {
 		return Config{}, errors.New("MCP_ENABLED debe ser true o false")
@@ -132,28 +139,29 @@ func parse(v map[string]string) (Config, error) {
 		return Config{}, errors.New("SSH_ENABLED debe ser true o false")
 	}
 	c := Config{
-		Listen:         net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort)),
-		SSHEnabled:     sshEnabled,
-		MCPEnabled:     mcpEnabled,
-		MCPPort:        mcpPort,
-		MCPTunnel:      value("MCP_TUNNEL", "cloudflare"),
-		MCPPublicURL:   value("MCP_PUBLIC_URL", ""),
-		MCPAccessPIN:   value("MCP_ACCESS_PIN", ""),
-		GitHubToken:    value("GITHUB_TOKEN", ""),
-		DataDir:        "/kaggle/working/.kagmcp",
-		HostKey:        value("SSH_HOST_KEY", filepath.Join("/kaggle/working", ".kagmcp", "ssh", "host_ed25519")),
-		LoginUser:      value("SSH_LOGIN_USER", login),
-		LoginPassword:  value("SSH_LOGIN_PASSWORD", ""),
-		AuthorizedKeys: value("SSH_AUTHORIZED_KEYS", ""),
-		VPSHost:        value("SSH_HOST", ""),
-		VPSUser:        value("SSH_USER", "root"),
-		VPSPassword:    value("SSH_PASSWORD", ""),
-		VPSKey:         value("SSH_KEY", ""),
-		VPSKnownHosts:  value("SSH_KNOWN_HOSTS", filepath.Join("/kaggle/working", ".kagmcp", "ssh", "known_hosts")),
-		VPSFingerprint: value("SSH_FINGERPRINT", ""),
-		VPSPort:        vpsPort,
-		RemotePort:     remotePort,
-		Retry:          5 * time.Second,
+		Listen:           net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort)),
+		SSHEnabled:       sshEnabled,
+		MCPEnabled:       mcpEnabled,
+		MCPPort:          mcpPort,
+		MCPGradioRetries: retries,
+		MCPTunnel:        value("MCP_TUNNEL", "auto"),
+		MCPPublicURL:     value("MCP_PUBLIC_URL", ""),
+		MCPAccessPIN:     value("MCP_ACCESS_PIN", ""),
+		GitHubToken:      value("GITHUB_TOKEN", ""),
+		DataDir:          "/kaggle/working/.kagmcp",
+		HostKey:          value("SSH_HOST_KEY", filepath.Join("/kaggle/working", ".kagmcp", "ssh", "host_ed25519")),
+		LoginUser:        value("SSH_LOGIN_USER", login),
+		LoginPassword:    value("SSH_LOGIN_PASSWORD", ""),
+		AuthorizedKeys:   value("SSH_AUTHORIZED_KEYS", ""),
+		VPSHost:          value("SSH_HOST", ""),
+		VPSUser:          value("SSH_USER", "root"),
+		VPSPassword:      value("SSH_PASSWORD", ""),
+		VPSKey:           value("SSH_KEY", ""),
+		VPSKnownHosts:    value("SSH_KNOWN_HOSTS", filepath.Join("/kaggle/working", ".kagmcp", "ssh", "known_hosts")),
+		VPSFingerprint:   value("SSH_FINGERPRINT", ""),
+		VPSPort:          vpsPort,
+		RemotePort:       remotePort,
+		Retry:            5 * time.Second,
 	}
 	return c, c.Validate()
 }
@@ -167,9 +175,12 @@ func (c Config) Validate() error {
 			return errors.New("MCP_ACCESS_PIN debe estar vacío (Go genera PIN) o tener entre 6 y 128 caracteres")
 		}
 		switch c.MCPTunnel {
-		case "cloudflare", "none":
+		case "auto", "gradio", "cloudflare", "none":
 		default:
-			return errors.New("MCP_TUNNEL admite cloudflare o none")
+			return errors.New("MCP_TUNNEL admite auto (Gradio→Cloudflare), gradio, cloudflare o none")
+		}
+		if c.MCPGradioRetries < 0 || c.MCPGradioRetries > 5 {
+			return errors.New("MCP_GRADIO_RETRIES debe estar entre 1 y 5")
 		}
 		if c.MCPPort < 1 || c.MCPPort > 65535 {
 			return errors.New("MCP_LISTEN_PORT fuera de rango")

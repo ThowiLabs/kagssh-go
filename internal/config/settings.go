@@ -11,7 +11,7 @@ import (
 
 // Solo opciones no sensibles se guardan en config.json. Nunca credenciales.
 var publicSettingKeys = map[string]bool{
-	"MCP_ENABLED": true, "MCP_TUNNEL": true, "MCP_PUBLIC_URL": true,
+	"MCP_ENABLED": true, "MCP_TUNNEL": true, "MCP_GRADIO_RETRIES": true, "MCP_PUBLIC_URL": true,
 	"MCP_LISTEN_PORT": true, "SSH_ENABLED": true,
 }
 
@@ -46,10 +46,11 @@ func SaveSettings(cfg Config) error {
 		return err
 	}
 	settings := map[string]string{
-		"MCP_ENABLED":     strconv.FormatBool(cfg.MCPEnabled),
-		"SSH_ENABLED":     strconv.FormatBool(cfg.SSHEnabled),
-		"MCP_TUNNEL":      cfg.MCPTunnel,
-		"MCP_LISTEN_PORT": strconv.Itoa(cfg.MCPPort),
+		"MCP_ENABLED":        strconv.FormatBool(cfg.MCPEnabled),
+		"SSH_ENABLED":        strconv.FormatBool(cfg.SSHEnabled),
+		"MCP_TUNNEL":         cfg.MCPTunnel,
+		"MCP_GRADIO_RETRIES": strconv.Itoa(max(1, cfg.MCPGradioRetries)),
+		"MCP_LISTEN_PORT":    strconv.Itoa(cfg.MCPPort),
 	}
 	if cfg.MCPPublicURL != "" {
 		settings["MCP_PUBLIC_URL"] = cfg.MCPPublicURL

@@ -144,8 +144,9 @@ def simulate_setup(source, *, secret_module=None):
     return local["RUNTIME_ENV"], output.getvalue(), list(fake_secret_reads)
 
 normal_env, normal_output, calls = simulate_setup(config_source)
-if calls or normal_env.get("SSH_ENABLED") != "false" or normal_env.get("MCP_ENABLED") != "true":
-    raise SystemExit("El perfil MCP-only no debe consultar Secrets ni habilitar SSH.")
+if (calls or normal_env.get("SSH_ENABLED") != "false" or normal_env.get("MCP_ENABLED") != "true"
+    or normal_env.get("MCP_TUNNEL") != "auto" or normal_env.get("MCP_GRADIO_RETRIES") != "3"):
+    raise SystemExit("MCP-only debe usar túnel Gradio prioritario, tres intentos y sin Secrets/SSH.")
 if (normal_env.get("MCP_ACCESS_PIN") != ""
     or "KAGGLE_USER_SECRETS_TOKEN" in normal_env or "KAGGLE_IAP_TOKEN" in normal_env
     or "GITHUB_TOKEN" in normal_env or "SSH_HOST" in normal_env):

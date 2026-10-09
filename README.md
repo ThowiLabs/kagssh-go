@@ -4,7 +4,7 @@
 
 No está afiliado, respaldado ni patrocinado por Kaggle, Google u OpenAI. El usuario es responsable de los permisos, cuotas y políticas del runtime.
 
-> **Estado:** base de MCP/OAuth, Cloudflare Quick Tunnel, herramientas de Kaggle, GitHub PAT y SSH opcional implementada y cubierta por pruebas locales. La compatibilidad extremo a extremo con un runtime Kaggle, un túnel público y un cliente ChatGPT real **todavía requiere validación**.
+> **Estado:** base de MCP/OAuth, Gradio FRP con respaldo Cloudflare, herramientas de Kaggle, GitHub PAT y SSH opcional implementada y cubierta por pruebas locales. La compatibilidad extremo a extremo con un runtime Kaggle, un túnel público y un cliente ChatGPT real **todavía requiere validación**.
 
 ## Inicio en Kaggle — configuración en Python (recomendado)
 
@@ -14,7 +14,7 @@ No está afiliado, respaldado ni patrocinado por Kaggle, Google u OpenAI. El usu
 2. Ejecuta `clonar`, `instalar-go` y `compilar`, en ese orden.
 3. Ejecuta la celda **configurar**. Por defecto trae `MCP_ENABLED=True`, `SSH_ENABLED=False` y `pin = ""`. Si dejas el PIN vacío, **Go genera uno temporal de 20 caracteres con aleatoriedad criptográfica** y lo muestra una sola vez en los logs de `run`. Opcionalmente puedes definir un PIN de **6 a 128 caracteres** en el notebook privado. Para GitHub, cambia `USE_GITHUB=True` y escribe el PAT de forma oculta con `getpass`.
 4. Ejecuta **validación** y después **run**. El proceso Go recibe las opciones como variables del proceso; **no consulta Kaggle Secrets** para MCP ni GitHub. La celda run permanece activa con logs en vivo.
-5. Copia la URL `https://....trycloudflare.com/mcp` y conecta ChatGPT con el PIN definido o generado por Go. Abre la URL raíz `https://....trycloudflare.com/` para iniciar sesión con ese mismo PIN y **cambiarlo desde el panel**; al cambiarlo se revocan tokens OAuth previos y sesiones web.
+5. Copia la URL `https://....gradio.live/mcp` que se muestre (o `https://....trycloudflare.com/mcp` si se activó el respaldo) y conecta ChatGPT con el PIN definido o generado por Go. Abre la URL raíz correspondiente (sin `/mcp`) para iniciar sesión con ese mismo PIN y **cambiarlo desde el panel**; al cambiarlo se revocan tokens OAuth previos y sesiones web.
 6. Para terminar, pulsa **Detener/Interruptar** en la celda run.
 
 **SSH/SFTP opcional:** activa `SSH_ENABLED=True` en la celda de configuración e indica allí el host, usuario, puertos y huella del VPS. Solo entonces Python lee desde Kaggle Secrets `SSH_PASSWORD` (contraseña del VPS) y `SSH_LOGIN_PASSWORD` (contraseña de entrada al servidor SSH local). Si SSH está deshabilitado, el notebook no invoca la API de Secrets.
@@ -28,7 +28,7 @@ ChatGPT / cliente MCP autorizado
           |
           | OAuth + HTTPS
           v
-  Cloudflare Quick Tunnel (URL HTTPS temporal)
+  Gradio FRP oficial (respaldo: Cloudflare Quick Tunnel)
           |
           v
  /kaggle/working / kagmcp (un único ejecutable Go)
@@ -36,10 +36,10 @@ ChatGPT / cliente MCP autorizado
    |-- herramientas de archivos, entorno, comandos
    |-- GitHub REST mediante token PERSONAL
    |-- SSH/SFTP + túnel inverso al VPS (opcional)
-   \-- estado OAuth y binario cloudflared en .kagmcp/
+   \-- estado OAuth y ejecutables FRP/cloudflared verificados en .kagmcp/
 ```
 
-Cloudflare termina HTTPS y reenvía al servidor HTTP que escucha **solamente en loopback**. Esto es correcto y distinto de la opción SSH: si se habilita el túnel SSH, el puerto solicitado al VPS sigue siendo **`0.0.0.0:SSH_PORT_KAGGLE`** para conexiones externas.
+El túnel elegido (Gradio por FRP/TLS, o Cloudflare como respaldo) transporta HTTPS al HTTP que escucha **solamente en loopback**. Esto es correcto y distinto de la opción SSH: si se habilita el túnel SSH, el puerto solicitado al VPS sigue siendo **`0.0.0.0:SSH_PORT_KAGGLE`** para conexiones externas.
 
 ## Configuración: Python primero y Secrets de SSH únicamente
 
@@ -49,7 +49,8 @@ En el notebook recomendado se prepara una copia llamada `RUNTIME_ENV` para cada 
 |---|---|---|
 | `MCP_ENABLED` | `True` | Inicia MCP |
 | `SSH_ENABLED` | `False` | Nunca inicia SSH involuntariamente |
-| `MCP_TUNNEL` | `cloudflare` | URL HTTPS temporal; también `none` con proxy externo |
+| `MCP_TUNNEL` | `auto` | Prueba Gradio primero, Cloudflare si agota reintentos. `gradio` y `cloudflare` son estrictos; `none` usa proxy propio |
+| `MCP_GRADIO_RETRIES` | `3` | Intentos Gradio en modo automático, mínimo 1 y máximo 5 |
 | `MCP_LISTEN_PORT` | `8181` | Puerto interno MCP |
 | `MCP_PUBLIC_URL` | vacío | Origen HTTPS si se usa `none` |
 | `USE_GITHUB` | `False` | Solicita PAT con `getpass` |
@@ -125,7 +126,7 @@ La salida del binario registra `descubrimiento MCP` con el nombre de los método
 
 - OAuth con PIN, PKCE, metadata de descubrimiento, protección de autorización y límites de solicitudes, heredados y adaptados de [Lilith-MCP](https://github.com/YahirHub/Lilith-MCP).
 - No publiques PIN, claves privadas ni tokens en celdas públicas, commits, URLs o logs.
-- Cloudflare Quick Tunnel publica una URL **temporal** que puede cambiar en cada sesión; `MCP_TUNNEL=none` requiere un proxy HTTPS propio y `MCP_PUBLIC_URL`.
+- Gradio FRP y Cloudflare publican URL **temporales** que pueden cambiar o caducar durante la sesión; `MCP_TUNNEL=none` requiere un proxy HTTPS propio y `MCP_PUBLIC_URL`.
 - **localhost.run y otros transportes aún no están implementados**; se contemplan para extensiones futuras tras verificar el flujo público y la identidad del servidor SSH.
 - La integración real con ChatGPT y un runtime Kaggle activo permanece pendiente de prueba extremo a extremo.
 - Los permisos de las herramientas MCP son los del proceso KagMCP: evita autorizar clientes no confiables.
@@ -144,7 +145,7 @@ Herramientas MCP añadidas:
 - `projects_list`, `project_create`, `project_memory_add`, `project_export`, `tasks_add`, `tasks_update`, `history_list`, `gradio_scaffold`.
 - `exec` admite `project` y `description` para auditar las operaciones de cada agente. Los comandos que posiblemente contienen credenciales se ocultan por completo en el historial, y no se almacena stdout.
 
-Al arrancar, el log muestra dos enlaces **del mismo túnel**: `https://...trycloudflare.com/mcp` para clientes MCP y **`https://...trycloudflare.com/`** para el panel. En la raíz `/`, inicia sesión con el **mismo PIN MCP**. El panel permite crear/consultar proyectos, memoria, tareas, historial, leer Skills y **configurar o desconectar el PAT GitHub**. El formulario usa cookies `Secure` + `HttpOnly` + `SameSite=Strict`, protección CSRF y verificación de origen, sesiones de 8 horas, revocación al cerrar sesión y límites de intentos.
+Al arrancar, el log muestra dos enlaces **del mismo túnel elegido**: `https://...gradio.live/mcp` para clientes MCP y **`https://...gradio.live/`** para el panel, o equivalentes `trycloudflare.com` si entró el respaldo. En la raíz `/`, inicia sesión con el **mismo PIN MCP**. El panel permite crear/consultar proyectos, memoria, tareas, historial, leer Skills y **configurar o desconectar el PAT GitHub**. El formulario usa cookies `Secure` + `HttpOnly` + `SameSite=Strict`, protección CSRF y verificación de origen, sesiones de 8 horas, revocación al cerrar sesión y límites de intentos.
 
 La web está implementada en el servidor Go, sin añadir una dependencia Python al servicio principal. **Gradio está reservado a las interfaces funcionales de los proyectos Kaggle**, posteriores a verificar notebook y Git. El generador fija `gradio==6.30.0` y documenta la compilación de `requirements-gradio.lock` con hashes mediante `pip-tools==7.6.2`. La instalación reproducible exige el lock creado y versionado; fijar solamente Gradio no inmoviliza todas sus transitivas.
 
@@ -179,3 +180,5 @@ Ambos comandos deben concluir satisfactoriamente; los ejecuta el agente autoriza
 La herramienta **no puede evaluar la calidad científica de las pruebas** ni garantiza que un comando exitoso cubra todas las funcionalidades: quien configura los comandos debe seleccionar verificaciones reales del proyecto. El notebook generado por `gradio_scaffold` sigue siendo una **plantilla que hay que conectar a la lógica funcional** y probar después.
 
 El portal `/` ofrece ahora **Exportar** y **Restaurar** la memoria del proyecto desde los archivos JSON/Markdown del repositorio. La restauración recupera notas y tareas, pero invalida comprobantes importados para obligar a repetir las pruebas en el nuevo runtime. Los archivos de contexto pueden contener datos privados y deben revisarse antes de publicarlos.
+
+**Túnel preferido:** `MCP_TUNNEL=auto` selecciona Gradio FRP (`https://xxxxx.gradio.live`) primero, con 3 intentos (`MCP_GRADIO_RETRIES` configurable de 1 a 5). Si FRP o la prueba HTTPS `/api/health` no funcionan, cambia automáticamente a Cloudflare (`https://xxxxx.trycloudflare.com`). Los modos explícitos `gradio`, `cloudflare` y `none` son estrictos, sin cambios de proveedor. No requiere instalar Gradio en Python. Consulta [USO_Y_CONFIGURACION.md](USO_Y_CONFIGURACION.md#selección-de-túneles-http-gradio-primero-cloudflare-de-respaldo).
