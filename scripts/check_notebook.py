@@ -20,7 +20,7 @@ for index, cell in enumerate(data["cells"], start=1):
     if cell["cell_type"] == "code":
         ast.parse(content, filename=f"{notebook.name}:celda-{index}")
         code_count += 1
-required = {"clonar", "instalar-go", "compilar", "validacion", "run"}
+required = {"clonar", "instalar-go", "compilar", "configurar", "validacion", "run"}
 if missing := required - ids:
     raise SystemExit(f"Celdas faltantes: {sorted(missing)}")
 
@@ -102,6 +102,98 @@ import contextlib
 import io
 import subprocess
 from unittest.mock import patch
+import getpass
+import os
+import sys
+import types
+
+# Pruebas de la celda configurar: con SSH apagado no se invoca Kaggle Secrets.
+config_source = "".join(next(c for c in data["cells"] if c["id"] == "configurar")["source"])
+test_pin = "TEST_ONLY_PIN_12345678"
+test_pat = "TEST_ONLY_GITHUB_PAT_ABC"
+test_vps_password = "TEST_ONLY_VPS_SECRET"
+test_local_password = "TEST_ONLY_LOGIN_SECRET"
+
+def simulate_setup(source, *, secret_module=None):
+    global fake_secret_reads
+    fake_secret_reads = []
+    module = types.ModuleType("kaggle_secrets")
+    class FakeSecrets:
+        def get_secret(self, label):
+            fake_secret_reads.append(label)
+            if label == "SSH_PASSWORD":
+                return test_vps_password
+            if label == "SSH_LOGIN_PASSWORD":
+                return test_local_password
+            raise AssertionError(f"Consulta inesperada a Kaggle Secrets: {label}")
+    module.UserSecretsClient = FakeSecrets
+    local = {
+        "WORKING": Path("/kaggle/working"),
+        "REPO_DIR": Path("/kaggle/working/kagssh-go"),
+    }
+    output = io.StringIO()
+    with (patch.dict(os.environ, {
+        "KAGGLE_USER_SECRETS_TOKEN": "TEST_ONLY_KAGGLE_INTERNAL_SECRET",
+        "KAGGLE_IAP_TOKEN": "TEST_ONLY_KAGGLE_IAP",
+        "SSH_ENABLED": "true", "SSH_HOST": "old-vps",
+        "MCP_ENABLED": "false", "GITHUB_TOKEN": "stale-token",
+    }), patch.dict(sys.modules, {"kaggle_secrets": module}),
+        patch.object(getpass, "getpass", side_effect=lambda prompt: test_pat if "GitHub" in prompt else test_pin),
+        contextlib.redirect_stdout(output)):
+        exec(compile(source, "celda-configurar", "exec"), local)
+    return local["RUNTIME_ENV"], output.getvalue(), list(fake_secret_reads)
+
+normal_env, normal_output, calls = simulate_setup(config_source)
+if calls or normal_env.get("SSH_ENABLED") != "false" or normal_env.get("MCP_ENABLED") != "true":
+    raise SystemExit("El perfil MCP-only no debe consultar Secrets ni habilitar SSH.")
+if (normal_env.get("MCP_ACCESS_PIN") != test_pin
+    or "KAGGLE_USER_SECRETS_TOKEN" in normal_env or "KAGGLE_IAP_TOKEN" in normal_env
+    or "GITHUB_TOKEN" in normal_env or "SSH_HOST" in normal_env):
+    raise SystemExit("El entorno de Go contiene valores antiguos o tokens internos Kaggle.")
+if any(value in normal_output for value in (test_pin, test_pat, test_vps_password, test_local_password)):
+    raise SystemExit("La celda configurar mostró secretos en stdout.")
+
+# Activar VPS debe consultar exactamente las dos contraseñas solicitadas.
+ssh_source = config_source.replace("SSH_ENABLED = False", "SSH_ENABLED = True")
+ssh_source = ssh_source.replace('SSH_HOST = ""', 'SSH_HOST = "vps.example"')
+ssh_env, ssh_output, ssh_reads = simulate_setup(ssh_source)
+if ssh_reads != ["SSH_PASSWORD", "SSH_LOGIN_PASSWORD"]:
+    raise SystemExit(f"Se consultaron Secrets ajenos al VPS: {ssh_reads}")
+if ssh_env.get("SSH_PASSWORD") != test_vps_password or ssh_env.get("SSH_LOGIN_PASSWORD") != test_local_password:
+    raise SystemExit("Las contraseñas no se entregaron al proceso SSH/MCP.")
+if any(value in ssh_output for value in (test_pin, test_vps_password, test_local_password)):
+    raise SystemExit("La celda con SSH mostró contraseñas.")
+
+# Confirmar uso opcional de PAT introducido sin Kaggle Secrets.
+github_source = config_source.replace("USE_GITHUB = False", "USE_GITHUB = True")
+github_env, _, github_reads = simulate_setup(github_source)
+if github_reads or github_env.get("GITHUB_TOKEN") != test_pat:
+    raise SystemExit("El PAT debe solicitarse mediante getpass, sin Secret de Kaggle.")
+
+# La validación y ejecución deben usar el MISMO entorno y no consultar Secrets.
+validation_source = "".join(next(c for c in data["cells"] if c["id"] == "validacion")["source"])
+observed = {}
+class FakeCheck:
+    returncode = 0
+    stdout = "configuración válida"
+    stderr = ""
+
+def fake_check(*args, **kwargs):
+    observed.update(kwargs)
+    if not args or args[0][-1] != "-check":
+        raise AssertionError("Se esperaba el comando de validación -check")
+    return FakeCheck()
+
+with patch.object(subprocess, "run", fake_check), contextlib.redirect_stdout(io.StringIO()):
+    exec(compile(validation_source, "celda-validacion", "exec"), {
+        "BINARY": "/kaggle/working/kagmcp-linux-amd64",
+        "WORKING": Path("/kaggle/working"),
+        "RUNTIME_ENV": normal_env,
+        "subprocess": subprocess,
+    })
+if observed.get("env") is not normal_env:
+    raise SystemExit("La celda -check no usó el entorno Python configurado.")
+print("Python configura MCP/SSH y Secrets selectivos: pruebas correctas.")
 
 class FakeGoProcess:
     def __init__(self, interrupt):
@@ -147,12 +239,15 @@ for interrupted in (False, True):
             raise AssertionError("Ejecución desacoplada o comando vacío")
         if kwargs.get("stdout") is not subprocess.PIPE or kwargs.get("stderr") is not subprocess.STDOUT:
             raise AssertionError("No captura los logs para mostrarlos en la celda")
+        if kwargs.get("env") is not normal_env or "KAGGLE_USER_SECRETS_TOKEN" in kwargs["env"]:
+            raise AssertionError("El binario no recibió el entorno seguro de la celda configurar")
         return fake
     output = io.StringIO()
     with patch.object(subprocess, "Popen", fake_popen), contextlib.redirect_stdout(output):
         exec(compile(run_source, "celda-run", "exec"), {
             "BINARY": "/kaggle/working/kagssh-linux-amd64",
             "WORKING": "/kaggle/working",
+            "RUNTIME_ENV": normal_env,
         })
     text = output.getvalue()
     if interrupted:

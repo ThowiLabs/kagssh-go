@@ -8,74 +8,59 @@ KagMCP es un servidor MCP **no oficial**, integrado en un binario Go ejecutado d
 
 El repositorio remoto sigue temporalmente en `ThowiLabs/kagssh-go`. Todavía no se ha renombrado la URL del repositorio ni el módulo Go. El nombre público del programa es **KagMCP**.
 
-## 1. Notebook
+## 1. Notebook — ejecución Python-first
 
-Abre [notebooks/kagssh_kaggle_chatgpt_agentes.ipynb](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle, habilita Internet y autoriza Secrets. El notebook:
+Abre [notebooks/kagssh_kaggle_chatgpt_agentes.ipynb](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle, habilita Internet, y ejecuta las siguientes celdas:
 
-1. Clona o actualiza `main` sin eliminar modificaciones locales.
-2. Comprueba la versión Go requerida y descarga una versión oficial verificando el hash si corresponde.
-3. Compila el ejecutable `/kaggle/working/kagmcp-linux-amd64` con `./cmd/kagssh`.
-4. Ejecuta `-check` para validar Secrets; no abre conexiones durante la comprobación.
-5. Arranca **una celda bloqueante** que muestra stdout/stderr en vivo. El botón de **Detener/Interruptar** cierra el proceso y los servicios dependientes.
+1. **clonar:** descarga `main` sin sobreescribir cambios locales.
+2. **instalar-go:** comprueba Go requerido o descarga la versión oficial validada con SHA256.
+3. **compilar:** genera `/kaggle/working/kagmcp-linux-amd64`.
+4. **configurar:** define opciones no sensibles y pide con `getpass` el PIN OAuth y el PAT opcional; con SSH activado consulta únicamente dos contraseñas SSH de Kaggle Secrets.
+5. **validación:** ejecuta `-check` con el entorno preparado **sin consultar Secrets**.
+6. **run:** inicia Go en primer plano, muestra sus logs y termina al pulsar **Detener/Interruptar**.
 
-## 2. Secrets
+El notebook que está abierto en Kaggle es una **copia independiente** del archivo en GitHub. Para utilizar nuevas celdas que añadimos al archivo del repositorio debes volver a importar el notebook o copiar sus celdas; correr **clonar** no lo actualiza en la interfaz.
 
-En Kaggle: **Add-ons → Secrets**, crea uno por nombre. Orden de precedencia:
+## 2. Configurar servicios y credenciales
 
-```text
-export de la variable > Secret individual Kaggle > `.kagmcp/config.json` (solo preferencias no sensibles) > predeterminado
+### Solo MCP (modo por defecto, sin Secrets)
+
+En la celda Python:
+
+```python
+MCP_ENABLED = True
+SSH_ENABLED = False
+MCP_TUNNEL = "cloudflare"
+MCP_LISTEN_PORT = 8181
+USE_GITHUB = False
 ```
 
-Nunca incluyas secretos reales en archivos Git ni en el propio notebook.
+El notebook solicita el PIN con `getpass.getpass`, sin guardarlo en el código. Inicia HTTP en `127.0.0.1:8181`, crea el túnel Cloudflare verificado y muestra la URL `https://...trycloudflare.com/mcp`.
 
-### MCP mínimo, sin VPS
+**La GPU no es necesaria para MCP.** Con SSH deshabilitado **no se hace ninguna llamada a Kaggle Secrets**, aunque en la cuenta existan Secrets antiguos. La celda retira de `RUNTIME_ENV` las credenciales internas `KAGGLE_USER_SECRETS_TOKEN` y `KAGGLE_IAP_TOKEN` antes de llamar a Go. El entorno global de Kaggle no se altera.
 
-| Nombre | Ejemplo |
+### MCP con GitHub PAT (sin Kaggle Secrets)
+
+Cambia `USE_GITHUB=True`; la celda solicita el GitHub Personal Access Token mediante entrada oculta, en memoria. No se necesita ninguna GitHub App ni etiqueta `GITHUB_TOKEN` en Secrets. Usa un PAT fine-grained limitado a los repositorios y permisos `Contents` necesarios.
+
+Herramientas: `github_status`, `github_repositories`, `github_branches`, `github_file_read` y `github_file_write`. La última necesita el SHA actual si actualiza un archivo existente.
+
+### SSH/VPS opcional (solo dos Secrets)
+
+Cambia `SSH_ENABLED=True` y define en Python `SSH_HOST`, `SSH_USER`, `SSH_PORT_REMOTE`, `SSH_PORT_KAGGLE`, `SSH_PORT_LOCAL`, `SSH_LOGIN_USER` y opcionalmente `SSH_FINGERPRINT`. Crea y autoriza únicamente:
+
+| Secret en Kaggle | Finalidad |
 |---|---|
-| `MCP_ENABLED` | `true` |
-| `MCP_ACCESS_PIN` | valor privado aleatorio de 12–128 caracteres |
-| `MCP_TUNNEL` | `cloudflare` (opcional: es el predeterminado) |
-| `SSH_ENABLED` | `false` (opcional: se selecciona automáticamente sin SSH_HOST) |
+| `SSH_PASSWORD` | Contraseña para conectar al VPS |
+| `SSH_LOGIN_PASSWORD` | Contraseña para entrar por SSH al runtime Kaggle |
 
-El proceso abre HTTP en `127.0.0.1:8181`, instala o reutiliza la utilidad verificada de Cloudflare y muestra un URL parecido a `https://nombre.trycloudflare.com/mcp`.
+El cliente `kaggle_secrets.UserSecretsClient` lee estos dos valores **una sola vez** cuando ejecutas la celda configurar con SSH activado, no durante `-check` ni `run`. En caso de HTTP 429 no hagas reintentos compulsivos. No guardes contraseñas en el notebook.
 
-Este hostname **no se elige manualmente** en Quick Tunnel, y puede cambiar en cada arranque. Cuando la URL cambie, el cliente MCP puede necesitar volver a autorizarse.
+En el VPS, `sshd` necesita `AllowTcpForwarding yes` y `GatewayPorts clientspecified` o `yes`. El túnel inverso solicita el puerto externo `0.0.0.0:SSH_PORT_KAGGLE`; protege ese puerto con firewall. Si no necesitas SSH, mantenlo desactivado.
 
-### GitHub mediante Personal Access Token
+### Prioridad y persistencia
 
-Solo añade:
-
-```text
-GITHUB_TOKEN = (token personal configurado como Kaggle Secret)
-```
-
-No hay GitHub App, client ID, instalación de App ni OAuth GitHub. El servidor llama la REST API de GitHub con cabecera Bearer.
-
-Herramientas:
-
-- `github_status`: verificar usuario autenticado, sin devolver el token.
-- `github_repositories`: listar hasta 100 repositorios recientes accesibles.
-- `github_branches`: listar las ramas de un repositorio.
-- `github_file_read`: leer contenido y SHA de un archivo de repositorio.
-- `github_file_write`: crear o actualizar contenido haciendo un commit; al actualizar se debe enviar el SHA actual obtenido de `github_file_read`.
-
-Usa un token fine-grained con solo el alcance y repositorios que necesitas. Para escrituras se necesita permiso **Contents: Read and write**; para operaciones de solo lectura basta **Contents: Read**.
-
-### SSH opcional mediante VPS
-
-Si también quieres SSH/SFTP:
-
-```text
-SSH_ENABLED=true
-SSH_HOST=IP_PUBLICA_O_DOMINIO_DEL_VPS
-SSH_USER=root
-SSH_PASSWORD=SECRETO_VPS
-SSH_LOGIN_PASSWORD=OTRO_SECRETO_DE_ACCESO_A_KAGGLE
-```
-
-Puedes emplear `SSH_KEY` y `SSH_AUTHORIZED_KEYS` como alternativas. Parámetros adicionales: `SSH_PORT_REMOTE=22`, `SSH_PORT_KAGGLE=2223`, `SSH_PORT_LOCAL=2224`, `SSH_LOGIN_USER`, `SSH_FINGERPRINT`, `SSH_KNOWN_HOSTS` y `SSH_HOST_KEY`.
-
-El servidor OpenSSH del VPS debe permitir `AllowTcpForwarding yes` y `GatewayPorts clientspecified` o `yes`. El túnel inverso solicita siempre `0.0.0.0:2223` para que sea externo. Protege el puerto en el firewall.
+El ejecutable Go sigue soportando, cuando se utiliza fuera de este notebook, sus fuentes anteriores (`env > Secrets > .kagmcp/config.json > default`). **En este notebook**, Python construye las variables explícitamente, elimina el token Kaggle Secrets del entorno del subprocess y evita consultas adicionales. El PIN, el PAT y las contraseñas solo viven en memoria durante el kernel, y los Secrets no se escriben en JSON ni Git.
 
 ## 3. Estados y archivos
 
@@ -89,7 +74,7 @@ El servidor OpenSSH del VPS debe permitir `AllowTcpForwarding yes` y `GatewayPor
   kagssh-go/                  # clon temporal del repositorio actual
 ```
 
-El programa emplea `/kaggle/working/.kagmcp` para estado privado y caché. Utiliza permisos privados de directorio y archivo. El archivo `config.json` se escribe automáticamente cuando arranca el CLI y solo conserva flags, puerto y URL propia. Los Secrets siguen siendo la fuente de las credenciales; no se serializan a JSON local.
+El programa emplea `/kaggle/working/.kagmcp` para estado privado y caché. Utiliza permisos privados de directorio y archivo. El archivo `config.json` se escribe automáticamente cuando arranca el CLI y solo conserva flags, puerto y URL propia. La celda Python aporta el PIN y PAT temporalmente con entrada oculta, mientras que Kaggle Secrets se consulta solo para las dos contraseñas SSH cuando corresponde. Ninguna credencial se serializa a JSON local.
 
 **Persistencia:** Kaggle puede perder archivos de `/kaggle/working` al cambiar de runtime, por lo que no se garantiza persistencia entre ejecuciones. Cuando se pierde el estado OAuth o cambia la URL pública, se vuelve a conectar el cliente.
 
@@ -156,9 +141,9 @@ La prueba real debe cubrir: inicio Cloudflare, URL HTTPS, descubrimiento OAuth, 
 
 **Segundo problema corregido:** el endpoint `tools/list` emitía esquemas inválidos con `"required": null` para las herramientas sin argumentos. El validador detectó esta incompatibilidad de JSON Schema, y la nueva versión **omite** esa propiedad cuando no corresponde. También hay pruebas contra la respuesta HTTP después de OAuth.
 
-**Actualizar el notebook no es suficiente y tampoco es necesario si sus celdas ya ejecutan Git clone/fetch y build:** es indispensable ejecutar nuevamente las celdas `clonar` (actualizar código de `main`), `compilar` (crear binario nuevo) y finalmente `run`. Si solo repites la celda `run`, inicias el mismo binario anterior.
+**Actualizaciones:** `clonar` actualiza el repositorio pero no las celdas del notebook ya abierto. Reimporta el notebook cuando cambien sus celdas; ejecuta `clonar → compilar → configurar → validación → run` para la versión actual.
 
-**SSH opcional:** si no lo utilizas, crea un Secret `SSH_ENABLED=false` para evitar que servicios SSH guardados se activen automáticamente. La presencia de logs SSH es independiente de la corrección del esquema MCP.
+**SSH opcional:** la nueva celda Python establece `SSH_ENABLED=False` por defecto, incluso con Secrets SSH antiguos.
 
 
 KagMCP admite tanto el protocolo MCP **2026-07-28** con `server/discover` (stateless) como los clientes que usan `initialize` y `tools/list` de 2025. Los cambios en la autenticación OAuth y los Secrets no son necesarios.
