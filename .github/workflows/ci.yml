@@ -19,7 +19,7 @@ jobs:
         run: go version
       - name: Validar notebook Kaggle (JSON y sintaxis Python)
         run: python3 scripts/check_notebook.py
-      - name: Pruebas completas e integración SSH local
+      - name: Pruebas MCP OAuth GitHub y SSH local
         run: go test -timeout 90s ./...
       - name: Análisis estático
         run: go vet ./...
@@ -28,8 +28,8 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           govulncheck ./...
       - name: Compilación estática
-        run: CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o kagssh ./cmd/kagssh
+        run: CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags="-s -w" -o kagmcp ./cmd/kagssh
       - name: Comprobar enlazado
         run: |
-          file kagssh
-          ! readelf -l kagssh | grep -q INTERP
+          file kagmcp
+          ! readelf -l kagmcp | grep -q INTERP

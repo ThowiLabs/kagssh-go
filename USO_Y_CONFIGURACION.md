@@ -1,212 +1,153 @@
-# Uso y configuración de KagSSH Go
+# Uso y configuración de KagMCP en Kaggle
 
-**Estado: 9 de octubre de 2026.** Esta guía describe el código que ya existe. La lectura de Kaggle Secrets y el túnel completo **todavía no se han probado en una notebook real**: las pruebas actuales son unitarias/simuladas y de compilación.
+## Proyecto y alcance
 
-**Caso de uso con agentes:** el objetivo es facilitar que **ChatGPT u otro agente que sí tenga una herramienta SSH/terminal** pueda acceder al runtime de Kaggle, **reparar notebooks rotos** y **crear o depurar proyectos de machine learning**. Esta herramienta es el medio de acceso remoto, no una conexión nativa del chat de ChatGPT, ni una API de ChatGPT, ni un servidor MCP, ni una función que repare notebooks por sí sola. Hay un [notebook de demostración con pasos de arranque y cierre](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb). Las ediciones por SSH a archivos `.ipynb` tampoco sincronizan automáticamente las celdas abiertas en la interfaz de Kaggle.
+KagMCP es un servidor MCP **no oficial**, integrado en un binario Go ejecutado directamente en un runtime Kaggle. Está diseñado para conectar ChatGPT y agentes compatibles con MCP mediante HTTPS/OAuth, habilitar trabajo autorizado en notebooks y datasets, administrar código y acceder a GitHub mediante un token personal.
 
-## 1. Qué hace el programa
+**No está afiliado a Kaggle, Google ni OpenAI.** El usuario es responsable de las condiciones del runtime.
 
-KagSSH Go reúne **servidor SSH + cliente SSH inverso + PTY + SFTP** en un único binario Go estático para Linux. No requiere Python, Go ni OpenSSH instalado en Kaggle para ejecutarse; para abrir una terminal sí necesita una shell Linux.
+El repositorio remoto sigue temporalmente en `ThowiLabs/kagssh-go`. Todavía no se ha renombrado la URL del repositorio ni el módulo Go. El nombre público del programa es **KagMCP**.
+
+## 1. Notebook
+
+Abre [notebooks/kagssh_kaggle_chatgpt_agentes.ipynb](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle, habilita Internet y autoriza Secrets. El notebook:
+
+1. Clona o actualiza `main` sin eliminar modificaciones locales.
+2. Comprueba la versión Go requerida y descarga una versión oficial verificando el hash si corresponde.
+3. Compila el ejecutable `/kaggle/working/kagmcp-linux-amd64` con `./cmd/kagssh`.
+4. Ejecuta `-check` para validar Secrets; no abre conexiones durante la comprobación.
+5. Arranca **una celda bloqueante** que muestra stdout/stderr en vivo. El botón de **Detener/Interruptar** cierra el proceso y los servicios dependientes.
+
+## 2. Secrets
+
+En Kaggle: **Add-ons → Secrets**, crea uno por nombre. Orden de precedencia:
 
 ```text
-PC ──SSH──> VPS:2223 ──forward inverso──> Kaggle:127.0.0.1:2224
-              ▲
-              └───── KagSSH Go conecta con el SSH del VPS en puerto 22
+export de la variable > Secret individual Kaggle > `.kagmcp/config.json` (solo preferencias no sensibles) > predeterminado
 ```
 
-**Tres puertos diferentes:** `SSH_PORT_REMOTE=22` conecta al SSH normal del VPS; `SSH_PORT_KAGGLE=2223` publica el túnel en el VPS; `SSH_PORT_LOCAL=2224` escucha dentro de Kaggle.
+Nunca incluyas secretos reales en archivos Git ni en el propio notebook.
 
-**Alcance:** este proyecto todavía **no** es un servidor MCP. La propuesta Kaggle MCP queda pospuesta, sin implementación.
+### MCP mínimo, sin VPS
 
-## 2. Antes de comenzar
-
-Necesitas un notebook de Kaggle con Internet y un VPS propio con servidor SSH en funcionamiento que permita TCP reverse forwarding. KagSSH crea automáticamente el servidor SSH dentro de Kaggle y prepara su registro de claves del VPS si falta. Para autenticar la identidad del VPS con seguridad desde la primera conexión, usa una huella obtenida por un canal de confianza.
-
-**Forma recomendada:** abre el [notebook de instalación y conexión](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle. Este clona `https://github.com/ThowiLabs/kagssh-go`, comprueba la versión requerida en `go.mod`, descarga **Go desde go.dev con verificación SHA-256** si hace falta, y compila el binario como `/kaggle/working/kagssh-linux-amd64`. Requiere Internet y no necesita adjuntar un ejecutable ni escribir Secrets en las celdas.
-
-**Alternativa manual:** el ejecutable precompilado para notebooks Kaggle x86_64 es `dist/kagssh-linux-amd64`. Puedes adjuntarlo/subirlo al notebook y ejecutarlo desde `/kaggle/working/kagssh-linux-amd64`. Utiliza una compilación actualizada con Go 1.26.9 o posterior; los binarios anteriores no se parchean automáticamente.
-
-Si adjuntas el binario como Kaggle Dataset/Input, copiarlo desde el Input (solo lectura) al directorio de trabajo:
-
-```python
-%%bash
-set -e
-cp /kaggle/input/NOMBRE_DEL_DATASET/kagssh-linux-amd64 /kaggle/working/kagssh-linux-amd64
-chmod +x /kaggle/working/kagssh-linux-amd64
-/kaggle/working/kagssh-linux-amd64 -version
-```
-
-Cambia `NOMBRE_DEL_DATASET` por el directorio real. Si el archivo ya está en `/kaggle/working`, omite el paso de copia.
-
-## 3. Forma recomendada: Kaggle Secrets individuales
-
-Abre **Add-ons → Secrets** en la notebook y crea **una etiqueta (Label) y valor (Value) por entrada**, autorizando su uso para ese notebook. El nombre de cada Secret es exactamente el nombre de la variable; **no** hay un Secret JSON ni prefijos `KAGSSH_`.
-
-| Label / variable | Valor de ejemplo | Qué representa |
-|---|---|---|
-| `SSH_HOST` | `mi-vps.example.com` | Dirección del VPS |
-| `SSH_USER` | `usuario_vps` | Usuario para entrar al SSH del VPS |
-| `SSH_PASSWORD` | contraseña privada del VPS | Autenticación de la conexión saliente al VPS |
-| `SSH_LOGIN_USER` | `usuario_kaggle` | Usuario admitido por el SSH integrado de Kaggle |
-| `SSH_LOGIN_PASSWORD` | **otra** contraseña privada | Contraseña para entrar a Kaggle |
-| `SSH_FINGERPRINT` | `SHA256:HUELLA_VERIFICADA` | **Opcional y más seguro:** huella verificada de la clave SSH del VPS |
-| `SSH_PORT_REMOTE` | `22` | Puerto del daemon SSH del VPS |
-| `SSH_PORT_KAGGLE` | `2223` | Puerto publicado en el VPS |
-| `SSH_PORT_LOCAL` | `2224` | Puerto interno de Kaggle |
-
-Los cuatro últimos ajustes de puertos/bind pueden omitirse cuando te sirven sus valores predeterminados. También puedes usar `SSH_KEY` (ruta a clave privada) en lugar de `SSH_PASSWORD`, o `SSH_AUTHORIZED_KEYS` (ruta a archivo de claves públicas) en lugar de `SSH_LOGIN_PASSWORD`.
-
-**No necesitas instalar OpenSSH en Kaggle ni crear `~/.ssh/known_hosts`.** El binario incorpora su propio servidor SSH y el cliente para el VPS. Si no hay huella fijada ni archivo de confianza, KagSSH crea automáticamente el archivo y recuerda la primera clave pública que presente el VPS, mostrando una advertencia con su huella; en las siguientes conexiones rechaza claves diferentes. Esta primera aceptación automática no comprueba por un canal independiente que sea realmente tu VPS (riesgo de suplantación durante el primer contacto). Para seguridad máxima, introduce una huella del VPS verificada como `SSH_FINGERPRINT`.
-
-Desde un acceso confiable al VPS, obtén/verifica su huella de host, por ejemplo:
-
-```bash
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
-```
-
-**Arranque recomendado:** ejecuta la celda **run** del [notebook actualizado](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb). La celda permanece **ejecutándose**, muestra en tiempo real los logs del proceso Go y se detiene con el botón **Detener/Interruptar** de Kaggle. El código atiende la interrupción y termina el proceso de forma controlada. No crea tareas en segundo plano ni requiere una celda STOP.
-
-El binario obtiene los Secrets por HTTPS usando el token suministrado por Kaggle. La API de Secrets en vivo aún necesita comprobación. Si Kaggle detiene la sesión, el túnel se pierde.
-
-## 4. Alternativa: todas las variables en la celda
-
-**Solo para pruebas en notebooks privados**, evitando guardar contraseñas en código compartido.
-
-```python
-%%bash
-set -e
-
-# Credenciales para la conexión saliente al VPS
-export SSH_HOST="mi-vps.example.com"
-export SSH_USER="usuario_vps"
-export SSH_PASSWORD="PASSWORD_PRIVADA_VPS"
-export SSH_FINGERPRINT="SHA256:HUELLA_VERIFICADA"
-export SSH_PORT_REMOTE="22"
-
-# Puerto de retorno público en el VPS
-export SSH_PORT_KAGGLE="2223"
-
-# Servidor SSH embebido de Kaggle
-export SSH_PORT_LOCAL="2224"
-export SSH_LOGIN_USER="usuario_kaggle"
-export SSH_LOGIN_PASSWORD="PASSWORD_PRIVADA_DIFERENTE"
-
-chmod +x /kaggle/working/kagssh-linux-amd64
-exec /kaggle/working/kagssh-linux-amd64
-```
-
-No incluyas valores reales en un repositorio o notebook público. El programa **no carga automáticamente** el archivo `.env.example`: es solo una plantilla de referencia.
-
-## 5. Alternativa mixta: Secrets + exports
-
-Puedes guardar todas las contraseñas en Kaggle Secrets y cambiar solo una configuración desde la celda:
-
-```python
-%%bash
-set -e
-export SSH_PORT_KAGGLE="3333"
-chmod +x /kaggle/working/kagssh-linux-amd64
-exec /kaggle/working/kagssh-linux-amd64
-```
-
-En este caso, el puerto solicitado al VPS será **3333**, aunque el Secret `SSH_PORT_KAGGLE` contenga `2223`.
-
-**Prioridad real:** variable exportada explícitamente → Secret de Kaggle con **la misma etiqueta** → valor predeterminado.
-
-Si no hay token de Secrets se usan exports/defaults. Si el servicio de Secrets devuelve un error distinto de etiqueta ausente (p. ej., error de red, autorización o cuota), el arranque puede fallar mostrando la etiqueta afectada sin revelar su contenido. El código no vuelve a pedir Secrets durante una reconexión del túnel.
-
-## 6. Catálogo completo de configuración
-
-| Variable | Valor predeterminado | Significado |
-|---|---|---|
-| `SSH_HOST` | **obligatorio** | IP pública o dominio del VPS |
-| `SSH_USER` | `root` | Usuario SSH de salida al VPS |
-| `SSH_PASSWORD` | vacío | Password del VPS |
-| `SSH_KEY` | vacío | **Ruta a archivo** de clave privada para acceder al VPS |
-| `SSH_FINGERPRINT` | vacío | Huella SHA256 confiable del SSH del VPS |
-| `SSH_KNOWN_HOSTS` | HOME + `/.ssh/known_hosts` | Archivo alternativo de claves SSH confiables |
-| `SSH_PORT_REMOTE` | `22` | Puerto SSH real del VPS |
-| `SSH_PORT_KAGGLE` | `2223` | Puerto publicado por el túnel en VPS |
-| `SSH_PORT_LOCAL` | `2224` | Puerto del SSH local en Kaggle |
-| `SSH_LOGIN_USER` | usuario Linux del proceso | Identidad admitida en el SSH integrado |
-| `SSH_LOGIN_PASSWORD` | vacío | Password para entrar a Kaggle |
-| `SSH_AUTHORIZED_KEYS` | vacío | **Ruta a archivo** con claves públicas para acceder a Kaggle |
-| `SSH_HOST_KEY` | HOME + `/.config/kagssh/host_ed25519` | Ruta a clave Ed25519 del servidor integrado, que se crea si falta |
-
-Se exige alguna autenticación para **ambos lados**: `SSH_PASSWORD` o `SSH_KEY` hacia el VPS; `SSH_LOGIN_PASSWORD` o `SSH_AUTHORIZED_KEYS` para entrar a Kaggle. Para identificar al VPS usa `SSH_FINGERPRINT` si está definida. Si no, KagSSH usa el archivo `SSH_KNOWN_HOSTS`, o lo crea automáticamente al primer contacto (TOFU); esa primera clave no está validada externamente, por lo que conviene comprobar su huella después por un canal seguro.
-
-**Los valores de SSH_KEY y SSH_AUTHORIZED_KEYS son rutas de archivos**, no texto PEM ni texto de claves. La versión actual no convierte automáticamente el contenido de un Secret en un archivo de claves. El nombre `SSH_LOGIN_USER` es una identidad SSH, **no cambia al usuario Unix**: la shell remota utiliza los permisos del proceso KagSSH Go.
-
-## 7. Acceso desde tu computadora
-
-KagSSH siempre solicita publicar el túnel en **`0.0.0.0:2223` en el VPS**, no en localhost. Puedes cambiar el número de puerto con `SSH_PORT_KAGGLE`, pero no se necesita ningún Secret de bind.
-
-**Configura OpenSSH en el VPS** con `AllowTcpForwarding yes` y `GatewayPorts clientspecified` (o `yes`). Abre TCP/2223 en el firewall del VPS y del proveedor. Si GatewayPorts está deshabilitado, el VPS puede publicar el túnel solamente en localhost aunque el cliente solicite una dirección pública.
-
-Desde tu computadora, directamente:
-
-```bash
-ssh -p 2223 usuario_kaggle@IP_PUBLICA_DEL_VPS
-sftp -P 2223 usuario_kaggle@IP_PUBLICA_DEL_VPS
-```
-
-Utiliza el valor de `SSH_LOGIN_USER` para el usuario y tu IP pública real para el servidor. Restringe los orígenes permitidos en el firewall y usa autenticación fuerte porque este puerto SSH queda accesible desde Internet.
-
-## 8. Validación y solución de problemas
-
-Antes de abrir el túnel puedes validar la carga y coherencia de la configuración:
-
-```python
-%%bash
-set -e
-chmod +x /kaggle/working/kagssh-linux-amd64
-/kaggle/working/kagssh-linux-amd64 -check
-```
-
-Resultado esperado: **configuración válida**. Esto **no** prueba que el SSH de VPS ni el túnel funcionen; tampoco equivale a una prueba completa de Secrets reales.
-
-| Síntoma | Revisión |
+| Nombre | Ejemplo |
 |---|---|
-| Binario sin permisos | Copiar a `/kaggle/working` y aplicar `chmod +x` |
-| `Exec format error` | Seleccionar binario Linux AMD64 en Kaggle x86_64 |
-| Error de Kaggle Secrets | Label exacto, autorización del notebook, Internet, token, cuota |
-| Password obligatoria ausente | Crear el Secret individual o definir export |
-| Huella SSH del VPS no coincide | Comprobar huella real desde canal seguro; no desactivar validación |
-| Error al publicar puerto remoto | VPS con SSH, Forwarding habilitado, puerto libre y permisos |
-| Llega desde localhost del VPS pero no desde PC | Revisar GatewayPorts y firewall TCP/2223 en el VPS |
-| Bind público no recibe conexiones | GatewayPorts, firewall, IP/dominio y puerto |
-| Sin shell/PTY | Shell Linux instalada y permisos del usuario que ejecutó KagSSH |
-| Desconexión al detener la notebook | Esperado: KagSSH necesita sesión activa |
+| `MCP_ENABLED` | `true` |
+| `MCP_ACCESS_PIN` | valor privado aleatorio de 12–128 caracteres |
+| `MCP_TUNNEL` | `cloudflare` (opcional: es el predeterminado) |
+| `SSH_ENABLED` | `false` (opcional: se selecciona automáticamente sin SSH_HOST) |
 
-El programa reintenta el túnel ante desconexiones, pero **no** puede mantener en ejecución una sesión que Kaggle haya terminado.
+El proceso abre HTTP en `127.0.0.1:8181`, instala o reutiliza la utilidad verificada de Cloudflare y muestra un URL parecido a `https://nombre.trycloudflare.com/mcp`.
 
-## 9. Compilar y probar desde Windows
+Este hostname **no se elige manualmente** en Quick Tunnel, y puede cambiar en cada arranque. Cuando la URL cambie, el cliente MCP puede necesitar volver a autorizarse.
 
-Directorio del repositorio: `C:\Users\Admin\Documents\GitHub\kagssh-go`.
+### GitHub mediante Personal Access Token
 
-```powershell
-$env:CGO_ENABLED = "0"
-$env:GOOS = "linux"
-$env:GOARCH = "amd64"
-go build -buildvcs=false -trimpath -ldflags="-s -w" -o dist/kagssh-linux-amd64 ./cmd/kagssh
+Solo añade:
 
-# Volver al destino nativo Windows antes de correr los tests
-Remove-Item Env:GOOS -ErrorAction SilentlyContinue
-Remove-Item Env:GOARCH -ErrorAction SilentlyContinue
-Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
-go test ./...
+```text
+GITHUB_TOKEN = (token personal configurado como Kaggle Secret)
 ```
 
-Para el build alternativo Linux ARM64, cambia `GOARCH` a `arm64` y salida a `dist/kagssh-linux-arm64`. Para pruebas Windows habituales, quita las variables de cross-build antes de ejecutar `go test ./...`.
+No hay GitHub App, client ID, instalación de App ni OAuth GitHub. El servidor llama la REST API de GitHub con cabecera Bearer.
 
-## 10. Seguridad y pendientes
+Herramientas:
 
-- No compartas passwords, tokens o claves privadas dentro del repositorio, logs o notebook público; rota claves/contraseñas que se hayan expuesto previamente.
-- Si se proporciona una huella del VPS, se verifica estrictamente. De lo contrario se usa una clave ya guardada o se registra la primera clave recibida (TOFU), sin validación independiente de ese primer contacto. Cualquier cambio posterior se rechaza.
-- SSH de Kaggle escucha solo en loopback interno; el puerto del VPS se solicita en 0.0.0.0 y queda expuesto si GatewayPorts y firewall lo permiten.
-- Se filtran variables `SSH_*` y `KAGGLE_*` del entorno de las shells lanzadas por SSH integrado, pero no se pueden deshacer secretos ya copiados a notebooks.
-- La clave de host de Kaggle persiste solamente si su ruta de almacenamiento sobrevive la sesión; si se recrea, la huella SSH del entorno podría cambiar.
-- Pruebas existentes: `go test ./...` (config/túnel) pasado en Windows, `go vet` cruzado a Linux pasado, builds Linux AMD64/ARM64 estáticos completados, pruebas SSH Linux compiladas pero no ejecutadas.
-- **Siguiente paso real:** correr en Kaggle con Secrets autorizados, probar SSH/PTY/SFTP hacia un VPS propio y verificar reconexión y STOP. No se declara probado hasta hacerlo.
+- `github_status`: verificar usuario autenticado, sin devolver el token.
+- `github_repositories`: listar hasta 100 repositorios recientes accesibles.
+- `github_branches`: listar las ramas de un repositorio.
+- `github_file_read`: leer contenido y SHA de un archivo de repositorio.
+- `github_file_write`: crear o actualizar contenido haciendo un commit; al actualizar se debe enviar el SHA actual obtenido de `github_file_read`.
 
-Consulta también [README.md](README.md), [contexto/03-secrets-individuales-kaggle.md](contexto/03-secrets-individuales-kaggle.md) y [tareas/pendiente-03-prueba-integracion-kaggle-vps.md](tareas/pendiente-03-prueba-integracion-kaggle-vps.md).
+Usa un token fine-grained con solo el alcance y repositorios que necesitas. Para escrituras se necesita permiso **Contents: Read and write**; para operaciones de solo lectura basta **Contents: Read**.
+
+### SSH opcional mediante VPS
+
+Si también quieres SSH/SFTP:
+
+```text
+SSH_ENABLED=true
+SSH_HOST=IP_PUBLICA_O_DOMINIO_DEL_VPS
+SSH_USER=root
+SSH_PASSWORD=SECRETO_VPS
+SSH_LOGIN_PASSWORD=OTRO_SECRETO_DE_ACCESO_A_KAGGLE
+```
+
+Puedes emplear `SSH_KEY` y `SSH_AUTHORIZED_KEYS` como alternativas. Parámetros adicionales: `SSH_PORT_REMOTE=22`, `SSH_PORT_KAGGLE=2223`, `SSH_PORT_LOCAL=2224`, `SSH_LOGIN_USER`, `SSH_FINGERPRINT`, `SSH_KNOWN_HOSTS` y `SSH_HOST_KEY`.
+
+El servidor OpenSSH del VPS debe permitir `AllowTcpForwarding yes` y `GatewayPorts clientspecified` o `yes`. El túnel inverso solicita siempre `0.0.0.0:2223` para que sea externo. Protege el puerto en el firewall.
+
+## 3. Estados y archivos
+
+```text
+/kaggle/working/
+  .kagmcp/
+    config.json              # preferencias no sensibles
+    state/oauth.json         # sesiones OAuth, no el PIN ni el PAT
+    cache/lilith-mcp/bin/     # copia verificada de cloudflared
+  kagmcp-linux-amd64
+  kagssh-go/                  # clon temporal del repositorio actual
+```
+
+El programa emplea `/kaggle/working/.kagmcp` para estado privado y caché. Utiliza permisos privados de directorio y archivo. El archivo `config.json` se escribe automáticamente cuando arranca el CLI y solo conserva flags, puerto y URL propia. Los Secrets siguen siendo la fuente de las credenciales; no se serializan a JSON local.
+
+**Persistencia:** Kaggle puede perder archivos de `/kaggle/working` al cambiar de runtime, por lo que no se garantiza persistencia entre ejecuciones. Cuando se pierde el estado OAuth o cambia la URL pública, se vuelve a conectar el cliente.
+
+## 4. Conectar un cliente MCP
+
+Después del arranque, copia la URL completa del log:
+
+```text
+https://subdominio.trycloudflare.com/mcp
+```
+
+Configura esa URL como servidor MCP remoto en el cliente compatible. El servidor exige autenticación OAuth y anuncia:
+
+- `/.well-known/oauth-protected-resource/mcp`
+- `/.well-known/oauth-authorization-server`
+- `/oauth/register`, `/oauth/authorize`, `/oauth/token`
+
+Durante la autorización, introduce el **PIN MCP** para permitir que ese cliente ejecute las herramientas. Acepta PKCE S256 y el descubrimiento moderno de clientes soportado por el módulo OAuth de Lilith.
+
+El tráfico HTTPS termina en Cloudflare; el origen de KagMCP se expone en loopback y no se publica directamente en `0.0.0.0`. Ese modo de escucha es **independiente** del bind público solicitado al VPS para SSH.
+
+## 5. Herramientas de Kaggle
+
+| Herramienta | Alcance |
+|---|---|
+| `environment_info` | Información general del runtime sin secretos |
+| `list_dir` | Listar rutas permitidas, máximo 100 entradas |
+| `read_file` | Leer archivos de texto de hasta 1 MiB |
+| `write_file` | Crear/modificar hasta 1 MiB en `/kaggle/working` |
+| `exec` | Shell de Kaggle, máximo 45 s y 64 KiB de logs |
+| GitHub tools | Repositorios, ramas, lectura y escritura de archivos |
+
+Los datasets de `/kaggle/input` son de solo lectura. Las herramientas de archivos rechazan las rutas fuera de los árboles permitidos y deniegan explícitamente acceso al directorio privado `.kagmcp`. Los comandos sí disponen de los privilegios del proceso: concede OAuth únicamente a clientes de confianza.
+
+## 6. Otros túneles
+
+- **`MCP_TUNNEL=cloudflare` (implementado):** túnel temporal Cloudflare con URL HTTPS pública automática; requiere conectividad saliente y la descarga verificada del conector.
+- **`MCP_TUNNEL=none` (implementado):** KagMCP escucha en loopback. Configura `MCP_PUBLIC_URL=https://dominio-propio` y un proxy externo que reenvíe HTTPS hacia el puerto local.
+- **`localhost.run` (pendiente):** servicio basado en SSH; su integración interna exigirá verificar la identidad del servidor y descubrir la URL publicada sin guardar contraseñas ni romper el binario único.
+
+El servicio no necesita una GitHub App para ninguno de estos transportes.
+
+## 7. Compilación y pruebas
+
+```bash
+go test ./...
+go vet ./...
+python scripts/check_notebook.py
+
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -o kagmcp-linux-amd64 ./cmd/kagssh
+```
+
+La prueba real debe cubrir: inicio Cloudflare, URL HTTPS, descubrimiento OAuth, autorización, `tools/list`, lectura/escritura Kaggle, llamadas GitHub con token de pruebas y detención desde la celda. Hasta entonces no consideres verificada la integración extremo a extremo.
+
+## 8. Riesgos y límites
+
+- KagMCP **no** conserva un runtime Kaggle vivo indefinidamente; debes cumplir sus límites de sesión.
+- Las herramientas autorizadas pueden ejecutar código dentro de Kaggle con los permisos reales del proceso, que en algunos runtimes pueden ser root.
+- `MCP_ACCESS_PIN`, `GITHUB_TOKEN`, `SSH_PASSWORD` y claves privadas nunca deben registrarse en notebooks públicos ni logs.
+- El cliente SSH con huella no configurada usa TOFU (confianza en primer uso); verifica esa primera huella fuera de banda.
+- No expongas el puerto de origen HTTP directamente a Internet; utiliza HTTPS y OAuth.

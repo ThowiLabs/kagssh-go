@@ -156,8 +156,8 @@ for interrupted in (False, True):
         })
     text = output.getvalue()
     if interrupted:
-        if not fake.terminated or "KagSSH detenido" not in text:
-            raise SystemExit("Interrumpir la celda no cierra KagSSH.")
+        if not fake.terminated or "KagMCP detenido" not in text:
+            raise SystemExit("Interrumpir la celda no cierra KagMCP.")
     elif fake.terminated or "servidor SSH activo" not in text or "túnel activo" not in text:
         raise SystemExit("La celda no muestra los logs en ejecución.")
 print("Pruebas simuladas de logs y KeyboardInterrupt: correctas.")

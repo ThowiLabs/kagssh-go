@@ -25,7 +25,7 @@ func (f *fakeSecrets) Get(_ context.Context, label string) (string, bool, error)
 
 func TestValidate(t *testing.T) {
 	base := Config{
-		Listen: "127.0.0.1:2224", LoginUser: "root", LoginPassword: "local",
+		Listen: "127.0.0.1:2224", LoginUser: "root", LoginPassword: "local", SSHEnabled: true,
 		VPSHost: "example.org", VPSUser: "root", VPSPassword: "remote", VPSPort: 22,
 		VPSFingerprint: "SHA256:verificada", RemotePort: 2223,
 	}

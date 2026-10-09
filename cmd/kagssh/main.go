@@ -4,14 +4,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ThowiLabs/kagssh-go/internal/config"
+	"github.com/ThowiLabs/kagssh-go/internal/mcp"
 	"github.com/ThowiLabs/kagssh-go/internal/sshserver"
 	"github.com/ThowiLabs/kagssh-go/internal/tunnel"
 )
@@ -23,7 +26,7 @@ func main() {
 	showVersion := flag.Bool("version", false, "mostrar versión")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println("kagssh", version)
+		fmt.Println("kagmcp", version)
 		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -34,36 +37,62 @@ func main() {
 		os.Exit(2)
 	}
 	if *check {
-		fmt.Println("configuración válida")
+		fmt.Println("configuración válida para KagMCP")
 		return
+	}
+	if err := config.SaveSettings(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "guardar preferencias KagMCP:", err)
+		os.Exit(1)
 	}
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	if os.Geteuid() == 0 {
-		log.Warn("el proceso corre como root: las sesiones SSH tendrán privilegios root")
+		log.Warn("KagMCP corre como root: las herramientas MCP/SSH tendrán privilegios del proceso")
 	}
-	ready := make(chan error, 1)
-	serverDone := make(chan error, 1)
-	tunnelDone := make(chan error, 1)
-	go func() { serverDone <- sshserver.Run(ctx, cfg, log, ready) }()
-	if err := <-ready; err != nil {
-		log.Error("no se pudo iniciar SSH", "error", err)
-		os.Exit(1)
-	}
-	go func() { tunnelDone <- tunnel.Run(ctx, cfg, log) }()
-	select {
-	case err = <-serverDone:
-		if err != nil {
-			log.Error("servidor SSH", "error", err)
+	results := make(chan error, 3)
+	services := 0
+	if cfg.SSHEnabled {
+		ready := make(chan error, 1)
+		services++
+		go func() { results <- sshserver.Run(ctx, cfg, log, ready) }()
+		if err := <-ready; err != nil {
+			stop()
+			log.Error("no se pudo iniciar SSH", "error", err)
+			os.Exit(1)
 		}
-	case err = <-tunnelDone:
-		if err != nil {
-			log.Error("túnel SSH", "error", err)
+		services++
+		go func() { results <- tunnel.Run(ctx, cfg, log) }()
+	}
+	if cfg.MCPEnabled {
+		services++
+		go func() { results <- mcp.Run(ctx, cfg, log) }()
+	}
+	completed := 0
+	failed := false
+	select {
+	case err = <-results:
+		completed++
+		if err != nil && !errors.Is(err, context.Canceled) {
+			failed = true
+			log.Error("servicio KagMCP terminó con error", "error", err)
 		}
 	case <-ctx.Done():
 	}
 	stop()
-	log.Info("cerrado")
-	if err != nil {
+	// Permitir que el servidor HTTP, SSH y el proceso cloudflared cierren
+	// antes de que el binario termine: Detener en Kaggle cierra todo.
+	deadline := time.NewTimer(12 * time.Second)
+	defer deadline.Stop()
+	for completed < services {
+		select {
+		case <-results:
+			completed++
+		case <-deadline.C:
+			log.Warn("tiempo de cierre agotado; terminando proceso")
+			completed = services
+		}
+	}
+	log.Info("KagMCP detenido")
+	if failed {
 		os.Exit(1)
 	}
 }

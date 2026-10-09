@@ -1,0 +1,427 @@
+package mcp
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/ThowiLabs/kagssh-go/internal/config"
+	"github.com/ThowiLabs/kagssh-go/internal/githubtoken"
+	"github.com/ThowiLabs/kagssh-go/internal/oauth"
+	"github.com/ThowiLabs/kagssh-go/internal/quicktunnel"
+	"github.com/ThowiLabs/kagssh-go/internal/securefs"
+)
+
+const protocol = "2025-11-25"
+const maxBody = 1 << 20
+
+type request struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
+}
+type rpcError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+type response struct {
+	JSONRPC string          `json:"jsonrpc"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  any             `json:"result,omitempty"`
+	Error   *rpcError       `json:"error,omitempty"`
+}
+type Server struct {
+	cfg    config.Config
+	public string
+	auth   *oauth.Server
+	github *githubtoken.Client
+}
+
+func New(cfg config.Config, public string) (*Server, error) {
+	if err := securefs.EnsurePrivateDir(cfg.DataDir); err != nil {
+		return nil, fmt.Errorf("proteger directorio KagMCP: %w", err)
+	}
+	state := filepath.Join(cfg.DataDir, "state", "oauth.json")
+	auth, err := oauth.New(oauth.Config{
+		PublicURL: public, StateFile: state, AccessPIN: cfg.MCPAccessPIN, AgentMode: true,
+		AccessTTL: time.Hour, RefreshTTL: 30 * 24 * time.Hour,
+		PINMaxAttempts: 5, PINWindow: 5 * time.Minute, PINLockout: 15 * time.Minute,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("autorización MCP: %w", err)
+	}
+	return &Server{cfg: cfg, public: public, auth: auth, github: githubtoken.New(cfg.GitHubToken)}, nil
+}
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	s.auth.RegisterRoutes(mux)
+	mux.Handle("/mcp", s)
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = io.WriteString(w, "KagMCP OK\n")
+	})
+	return mux
+}
+func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.MCPPort))
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("escuchar MCP: %w", err)
+	}
+	defer ln.Close()
+	public := cfg.MCPPublicURL
+	var tunnel *quicktunnel.Tunnel
+	if cfg.MCPTunnel == "cloudflare" {
+		tunnel, err = quicktunnel.Start(ctx, "http://"+addr)
+		if err != nil {
+			return fmt.Errorf("crear URL HTTPS Cloudflare: %w", err)
+		}
+		defer tunnel.Close()
+		public = tunnel.URL
+	}
+	if public == "" {
+		return errors.New("falta URL pública del servidor MCP")
+	}
+	server, err := New(cfg, public)
+	if err != nil {
+		return err
+	}
+	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout: 60 * time.Second, WriteTimeout: 65 * time.Second, IdleTimeout: 75 * time.Second,
+		MaxHeaderBytes: 16 << 10}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = httpServer.Shutdown(shutdownCtx)
+	}()
+	log.Info("KagMCP listo para conectar cliente MCP", "url", public+"/mcp", "tunnel", cfg.MCPTunnel, "github_token_configurado", cfg.GitHubToken != "")
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = httpServer.Close()
+		case <-stopped:
+		}
+	}()
+	defer close(stopped)
+	err = httpServer.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+		return nil
+	}
+	return err
+}
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Rechazar Origin remoto que no corresponde al URL autorizado.
+	if origin := r.Header.Get("Origin"); origin != "" && origin != s.public {
+		http.Error(w, "Origin no permitido", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "este endpoint requiere POST", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.auth.ValidateBearer(r); err != nil {
+		w.Header().Set("WWW-Authenticate", s.auth.WWWAuthenticate("invalid_token", "autorización requerida"))
+		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
+		return
+	}
+	if version := r.Header.Get("MCP-Protocol-Version"); version != "" && version != protocol && version != "2025-03-26" {
+		http.Error(w, "versión de MCP no compatible", http.StatusBadRequest)
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		http.Error(w, "Content-Type debe ser application/json", http.StatusUnsupportedMediaType)
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, maxBody)
+	defer body.Close()
+	var req request
+	if err := json.NewDecoder(body).Decode(&req); err != nil {
+		s.rpc(w, response{JSONRPC: "2.0", Error: &rpcError{-32700, "JSON no válido"}})
+		return
+	}
+	if req.JSONRPC != "2.0" || req.Method == "" {
+		s.rpc(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32600, "petición inválida"}})
+		return
+	}
+	if len(req.ID) == 0 {
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	resp := response{JSONRPC: "2.0", ID: req.ID}
+	switch req.Method {
+	case "initialize":
+		resp.Result = map[string]any{"protocolVersion": protocol,
+			"capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
+			"serverInfo":   map[string]string{"name": "kagmcp", "title": "KagMCP", "version": "0.1.0"},
+			"instructions": "Herramientas directas dentro de una sesión Kaggle autorizada. Los archivos de trabajo están en /kaggle/working; los datasets de /kaggle/input son de solo lectura. Confirma acciones destructivas. Nunca publiques credenciales, Secrets ni contenido privado."}
+	case "ping":
+		resp.Result = map[string]any{}
+	case "tools/list":
+		resp.Result = map[string]any{"tools": s.definitions()}
+	case "tools/call":
+		var call struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		}
+		if err := json.Unmarshal(req.Params, &call); err != nil || call.Name == "" {
+			resp.Error = &rpcError{-32602, "tools/call requiere name y arguments"}
+		} else {
+			out, err := s.invoke(r.Context(), call.Name, call.Arguments)
+			resp.Result = toolResult(out, err)
+		}
+	default:
+		resp.Error = &rpcError{-32601, "método desconocido"}
+	}
+	s.rpc(w, resp)
+}
+func (s *Server) rpc(w http.ResponseWriter, v response) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_ = json.NewEncoder(w).Encode(v)
+}
+func toolResult(data any, err error) any {
+	if err != nil {
+		return map[string]any{"content": []any{map[string]string{"type": "text", "text": err.Error()}}, "isError": true}
+	}
+	b, marshalErr := json.Marshal(data)
+	if marshalErr != nil {
+		b = []byte("{}")
+	}
+	return map[string]any{"content": []any{map[string]string{"type": "text", "text": string(b)}}, "isError": false}
+}
+func def(name, desc string, properties map[string]any, required ...string) any {
+	return map[string]any{"name": name, "description": desc, "inputSchema": map[string]any{
+		"type": "object", "properties": properties, "required": required, "additionalProperties": false}}
+}
+func stringProp(desc string) any { return map[string]string{"type": "string", "description": desc} }
+func (s *Server) definitions() []any {
+	return []any{
+		def("environment_info", "Información del runtime Kaggle sin credenciales", map[string]any{}),
+		def("list_dir", "Lista directorios en /kaggle/working o /kaggle/input", map[string]any{"path": stringProp("Ruta de Kaggle")}),
+		def("read_file", "Lee un archivo de texto Kaggle hasta 1 MiB", map[string]any{"path": stringProp("Ruta a leer")}, "path"),
+		def("write_file", "Escribe un archivo en /kaggle/working hasta 1 MiB", map[string]any{"path": stringProp("Ruta a escribir"), "content": stringProp("Contenido completo")}, "path", "content"),
+		def("exec", "Ejecuta un comando en el runtime Kaggle con timeout y salida limitada", map[string]any{"command": stringProp("Comando shell"), "cwd": stringProp("Directorio de trabajo en /kaggle/working")}, "command"),
+		def("github_status", "Valida GITHUB_TOKEN y muestra cuenta autenticada", map[string]any{}),
+		def("github_repositories", "Lista repositorios accesibles con GITHUB_TOKEN (100 recientes)", map[string]any{}),
+		def("github_branches", "Lista ramas de un repositorio", map[string]any{"repository": stringProp("owner/repo")}, "repository"),
+		def("github_file_read", "Lee un archivo mediante API GitHub", map[string]any{"repository": stringProp("owner/repo"), "path": stringProp("ruta relativa"), "ref": stringProp("rama o SHA opcional")}, "repository", "path"),
+		def("github_file_write", "Crea o actualiza un archivo mediante API GitHub y genera un commit", map[string]any{"repository": stringProp("owner/repo"), "path": stringProp("ruta relativa"), "branch": stringProp("rama destino"), "message": stringProp("mensaje de commit"), "content": stringProp("contenido completo"), "sha": stringProp("SHA anterior obligatorio al actualizar")}, "repository", "path", "branch", "message", "content"),
+	}
+}
+func (s *Server) invoke(ctx context.Context, name string, raw json.RawMessage) (any, error) {
+	var a struct {
+		Path       string `json:"path"`
+		Content    string `json:"content"`
+		Command    string `json:"command"`
+		Cwd        string `json:"cwd"`
+		Repository string `json:"repository"`
+		Ref        string `json:"ref"`
+		Branch     string `json:"branch"`
+		Message    string `json:"message"`
+		SHA        string `json:"sha"`
+	}
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &a); err != nil {
+			return nil, fmt.Errorf("argumentos JSON inválidos: %w", err)
+		}
+	}
+	switch name {
+	case "environment_info":
+		hostname, _ := os.Hostname()
+		return map[string]any{"platform": "kaggle", "hostname": hostname, "working": "/kaggle/working", "datasets": "/kaggle/input", "mcp_url": s.public + "/mcp", "github_configured": s.cfg.GitHubToken != "", "ssh_enabled": s.cfg.SSHEnabled}, nil
+	case "list_dir":
+		return s.listDir(a.Path)
+	case "read_file":
+		return s.readFile(a.Path)
+	case "write_file":
+		return s.writeFile(a.Path, a.Content)
+	case "exec":
+		return s.exec(ctx, a.Command, a.Cwd)
+	case "github_status":
+		return s.github.Status(ctx)
+	case "github_repositories":
+		return s.github.Repos(ctx)
+	case "github_branches":
+		return s.github.Branches(ctx, a.Repository)
+	case "github_file_read":
+		return s.github.ReadFile(ctx, a.Repository, a.Path, a.Ref)
+	case "github_file_write":
+		return s.github.WriteFile(ctx, a.Repository, a.Path, a.Branch, a.Message, a.Content, a.SHA)
+	}
+	return nil, errors.New("herramienta desconocida")
+}
+func (s *Server) path(raw string, write bool) (string, error) {
+	if raw == "" {
+		raw = "/kaggle/working"
+	}
+	if !filepath.IsAbs(raw) {
+		raw = filepath.Join("/kaggle/working", raw)
+	}
+	cleaned := filepath.Clean(raw)
+	private := filepath.Clean(s.cfg.DataDir)
+	if cleaned == private || strings.HasPrefix(cleaned, private+string(os.PathSeparator)) {
+		return "", errors.New("el directorio privado .kagmcp no es accesible mediante MCP")
+	}
+	inWorking := cleaned == "/kaggle/working" || strings.HasPrefix(cleaned, "/kaggle/working/")
+	inInput := cleaned == "/kaggle/input" || strings.HasPrefix(cleaned, "/kaggle/input/")
+	if !inWorking && (!inInput || write) {
+		return "", errors.New("ruta fuera del ámbito autorizado de Kaggle")
+	}
+	// No permitir desbordamiento mediante symlinks dentro del árbol autorizado.
+	inspect := cleaned
+	for {
+		target, err := filepath.EvalSymlinks(inspect)
+		if err == nil {
+			suffix, relErr := filepath.Rel(inspect, cleaned)
+			if relErr == nil {
+				actual := filepath.Clean(filepath.Join(target, suffix))
+				withinWorking := actual == "/kaggle/working" || strings.HasPrefix(actual, "/kaggle/working/")
+				withinInput := actual == "/kaggle/input" || strings.HasPrefix(actual, "/kaggle/input/")
+				if !(withinWorking || (!write && withinInput)) || actual == private || strings.HasPrefix(actual, private+"/") {
+					return "", errors.New("enlace simbólico fuera del ámbito autorizado")
+				}
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(inspect)
+		if parent == inspect {
+			return "", errors.New("no se pudo validar la ruta")
+		}
+		inspect = parent
+	}
+	return cleaned, nil
+}
+func (s *Server) listDir(raw string) (any, error) {
+	path, err := s.path(raw, false)
+	if err != nil {
+		return nil, err
+	}
+	list, err := os.ReadDir(path)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]any, 0, min(100, len(list)))
+	for _, f := range list {
+		if f.Name() == ".kagmcp" || len(files) >= 100 {
+			continue
+		}
+		info, e := f.Info()
+		if e != nil {
+			continue
+		}
+		files = append(files, map[string]any{"name": f.Name(), "is_dir": f.IsDir(), "size": info.Size()})
+	}
+	return map[string]any{"path": path, "entries": files, "truncated": len(list) > 100}, nil
+}
+func (s *Server) readFile(raw string) (any, error) {
+	path, err := s.path(raw, false)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return nil, errors.New("solo archivos regulares de hasta 1 MiB")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": path, "size": len(content), "content": string(content)}, nil
+}
+func (s *Server) writeFile(raw, content string) (any, error) {
+	path, err := s.path(raw, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > 1<<20 {
+		return nil, errors.New("escritura limitada a 1 MiB")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		return nil, err
+	}
+	return map[string]any{"path": path, "bytes_written": len(content)}, nil
+}
+
+type limitedWriter struct {
+	b   bytes.Buffer
+	max int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	if w.b.Len() < w.max {
+		_, _ = w.b.Write(p[:min(len(p), w.max-w.b.Len())])
+	}
+	return n, nil
+}
+func (s *Server) exec(ctx context.Context, command, cwd string) (any, error) {
+	if command == "" || len(command) > 16<<10 {
+		return nil, errors.New("comando vacío o demasiado grande")
+	}
+	if cwd == "" {
+		cwd = "/kaggle/working"
+	}
+	dir, err := s.path(cwd, true)
+	if err != nil {
+		return nil, err
+	}
+	stat, err := os.Stat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if !stat.IsDir() {
+		return nil, errors.New("cwd no es un directorio")
+	}
+	taskCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+	shell := "/bin/bash"
+	if _, err := os.Stat(shell); err != nil {
+		shell = "/bin/sh"
+	}
+	cmd := exec.CommandContext(taskCtx, shell, "-lc", command)
+	cmd.Dir = dir
+	for _, line := range os.Environ() {
+		if strings.HasPrefix(line, "GITHUB_") || strings.HasPrefix(line, "MCP_") || strings.HasPrefix(line, "KAGGLE_") || strings.HasPrefix(line, "SSH_") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, line)
+	}
+	output := &limitedWriter{max: 65536}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
+	result := map[string]any{"output": output.b.String(), "truncated": output.b.Len() == 65536}
+	if taskCtx.Err() != nil {
+		result["timeout"] = true
+		return result, errors.New("comando cancelado o excedió 45s")
+	}
+	if err != nil {
+		result["error"] = err.Error()
+	}
+	return result, nil
+}

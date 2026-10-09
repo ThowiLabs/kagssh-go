@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -19,6 +20,8 @@ var names = []string{
 	"SSH_KNOWN_HOSTS", "SSH_PORT_REMOTE", "SSH_PORT_KAGGLE", "SSH_PORT_LOCAL",
 	"SSH_LOGIN_USER", "SSH_LOGIN_PASSWORD",
 	"SSH_AUTHORIZED_KEYS", "SSH_HOST_KEY",
+	"MCP_ENABLED", "MCP_TUNNEL", "MCP_PUBLIC_URL", "MCP_LISTEN_PORT", "MCP_ACCESS_PIN",
+	"SSH_ENABLED", "GITHUB_TOKEN",
 }
 
 type Config struct {
@@ -26,6 +29,9 @@ type Config struct {
 	VPSHost, VPSUser, VPSPassword, VPSKey, VPSKnownHosts, VPSFingerprint string
 	VPSPort, RemotePort                                                  int
 	Retry                                                                time.Duration
+	SSHEnabled, MCPEnabled                                               bool
+	MCPPort                                                              int
+	MCPTunnel, MCPPublicURL, MCPAccessPIN, GitHubToken, DataDir          string
 }
 
 // SecretReader permite probar Kaggle Secrets sin una conexión real.
@@ -38,25 +44,37 @@ func FromEnv(ctx context.Context) (Config, error) {
 	if token := os.Getenv("KAGGLE_USER_SECRETS_TOKEN"); token != "" {
 		reader = newKaggleSecrets(token, os.Getenv("KAGGLE_IAP_TOKEN"))
 	}
-	return Load(ctx, os.LookupEnv, reader)
+	settings, err := readSettings("/kaggle/working/.kagmcp/config.json")
+	if err != nil {
+		return Config{}, err
+	}
+	return load(ctx, os.LookupEnv, reader, settings)
 }
 
 // Load: export explícito > secret individual de Kaggle > valor predeterminado.
 func Load(ctx context.Context, lookup func(string) (string, bool), secrets SecretReader) (Config, error) {
+	return load(ctx, lookup, secrets, nil)
+}
+
+// load respeta export > Secret > preferencia no sensible de .kagmcp/config.json > default.
+func load(ctx context.Context, lookup func(string) (string, bool), secrets SecretReader, settings map[string]string) (Config, error) {
 	values := make(map[string]string, len(names))
 	for _, name := range names {
 		if value, exists := lookup(name); exists {
 			values[name] = value
 			continue
 		}
-		if secrets == nil {
-			continue
+		if secrets != nil {
+			value, found, err := secrets.Get(ctx, name)
+			if err != nil {
+				return Config{}, fmt.Errorf("leyendo el Secret %s de Kaggle: %w", name, err)
+			}
+			if found {
+				values[name] = value
+				continue
+			}
 		}
-		value, found, err := secrets.Get(ctx, name)
-		if err != nil {
-			return Config{}, fmt.Errorf("leyendo el Secret %s de Kaggle: %w", name, err)
-		}
-		if found {
+		if value, found := settings[name]; found && publicSettingKeys[name] {
 			values[name] = value
 		}
 	}
@@ -64,10 +82,6 @@ func Load(ctx context.Context, lookup func(string) (string, bool), secrets Secre
 }
 
 func parse(v map[string]string) (Config, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return Config{}, err
-	}
 	login := "root"
 	if u, err := user.Current(); err == nil && u.Username != "" {
 		login = u.Username
@@ -101,9 +115,33 @@ func parse(v map[string]string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpPort, err := port("MCP_LISTEN_PORT", 8181)
+	if err != nil {
+		return Config{}, err
+	}
+	mcpEnabled, err := strconv.ParseBool(value("MCP_ENABLED", "false"))
+	if err != nil {
+		return Config{}, errors.New("MCP_ENABLED debe ser true o false")
+	}
+	defaultSSH := "true"
+	if mcpEnabled && value("SSH_HOST", "") == "" {
+		defaultSSH = "false"
+	}
+	sshEnabled, err := strconv.ParseBool(value("SSH_ENABLED", defaultSSH))
+	if err != nil {
+		return Config{}, errors.New("SSH_ENABLED debe ser true o false")
+	}
 	c := Config{
 		Listen:         net.JoinHostPort("127.0.0.1", strconv.Itoa(localPort)),
-		HostKey:        value("SSH_HOST_KEY", filepath.Join(home, ".config", "kagssh", "host_ed25519")),
+		SSHEnabled:     sshEnabled,
+		MCPEnabled:     mcpEnabled,
+		MCPPort:        mcpPort,
+		MCPTunnel:      value("MCP_TUNNEL", "cloudflare"),
+		MCPPublicURL:   value("MCP_PUBLIC_URL", ""),
+		MCPAccessPIN:   value("MCP_ACCESS_PIN", ""),
+		GitHubToken:    value("GITHUB_TOKEN", ""),
+		DataDir:        "/kaggle/working/.kagmcp",
+		HostKey:        value("SSH_HOST_KEY", filepath.Join("/kaggle/working", ".kagmcp", "ssh", "host_ed25519")),
 		LoginUser:      value("SSH_LOGIN_USER", login),
 		LoginPassword:  value("SSH_LOGIN_PASSWORD", ""),
 		AuthorizedKeys: value("SSH_AUTHORIZED_KEYS", ""),
@@ -111,7 +149,7 @@ func parse(v map[string]string) (Config, error) {
 		VPSUser:        value("SSH_USER", "root"),
 		VPSPassword:    value("SSH_PASSWORD", ""),
 		VPSKey:         value("SSH_KEY", ""),
-		VPSKnownHosts:  value("SSH_KNOWN_HOSTS", filepath.Join(home, ".ssh", "known_hosts")),
+		VPSKnownHosts:  value("SSH_KNOWN_HOSTS", filepath.Join("/kaggle/working", ".kagmcp", "ssh", "known_hosts")),
 		VPSFingerprint: value("SSH_FINGERPRINT", ""),
 		VPSPort:        vpsPort,
 		RemotePort:     remotePort,
@@ -121,6 +159,37 @@ func parse(v map[string]string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if !c.SSHEnabled && !c.MCPEnabled {
+		return errors.New("habilita MCP_ENABLED o SSH_ENABLED")
+	}
+	if c.MCPEnabled {
+		if len(c.MCPAccessPIN) < 12 || len(c.MCPAccessPIN) > 128 || strings.ContainsAny(c.MCPAccessPIN, "\r\n\x00") {
+			return errors.New("MCP_ACCESS_PIN debe tener entre 12 y 128 caracteres y configurarse en Kaggle Secrets")
+		}
+		switch c.MCPTunnel {
+		case "cloudflare", "none":
+		default:
+			return errors.New("MCP_TUNNEL admite cloudflare o none")
+		}
+		if c.MCPPort < 1 || c.MCPPort > 65535 {
+			return errors.New("MCP_LISTEN_PORT fuera de rango")
+		}
+		if c.MCPPublicURL != "" {
+			u, err := url.Parse(c.MCPPublicURL)
+			if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || strings.ContainsAny(c.MCPPublicURL, "\r\n\x00") {
+				return errors.New("MCP_PUBLIC_URL debe ser un origen https sin path, credenciales, query ni fragment")
+			}
+			if c.MCPTunnel == "cloudflare" {
+				return errors.New("MCP_PUBLIC_URL sólo se usa con MCP_TUNNEL=none; Cloudflare crea URL temporal")
+			}
+		}
+		if c.MCPTunnel == "none" && c.MCPPublicURL == "" {
+			return errors.New("MCP_PUBLIC_URL es obligatorio con MCP_TUNNEL=none para OAuth remoto")
+		}
+	}
+	if !c.SSHEnabled {
+		return nil
+	}
 	if c.LoginUser == "" || strings.ContainsAny(c.LoginUser, "\r\n\x00") {
 		return errors.New("usuario local inválido")
 	}

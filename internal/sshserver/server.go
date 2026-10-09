@@ -291,7 +291,7 @@ func runPTY(ctx context.Context, cmd *exec.Cmd, master *os.File, ch ssh.Channel)
 func safeShellEnvironment() []string {
 	env := make([]string, 0, len(os.Environ()))
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "SSH_") && !strings.HasPrefix(entry, "KAGGLE_") {
+		if !strings.HasPrefix(entry, "SSH_") && !strings.HasPrefix(entry, "KAGGLE_") && !strings.HasPrefix(entry, "MCP_") && !strings.HasPrefix(entry, "GITHUB_") {
 			env = append(env, entry)
 		}
 	}
