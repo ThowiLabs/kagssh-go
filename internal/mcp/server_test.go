@@ -91,3 +91,58 @@ func TestStateInPrivateDir(t *testing.T) {
 	}
 	_ = req
 }
+
+func TestAllToolSchemasJSONSchemaRequiredArrays(t *testing.T) {
+	s := newTestServer(t)
+	raw, err := json.Marshal(s.definitions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var defs []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &defs); err != nil {
+		t.Fatal(err)
+	}
+	optionalCount := 0
+	for _, item := range defs {
+		var name string
+		if err := json.Unmarshal(item["name"], &name); err != nil {
+			t.Fatal(err)
+		}
+		var schema map[string]json.RawMessage
+		if err := json.Unmarshal(item["inputSchema"], &schema); err != nil {
+			t.Fatalf("%s schema: %v", name, err)
+		}
+		if string(schema["type"]) != `"object"` {
+			t.Errorf("%s: inputSchema.type debe ser object", name)
+		}
+		var properties map[string]any
+		if err := json.Unmarshal(schema["properties"], &properties); err != nil {
+			t.Errorf("%s: properties: %v", name, err)
+		}
+		// JSON Schema 2020-12: required es opcional; si existe debe ser
+		// array de cadenas únicas, nunca null (antes había required:null).
+		required, ok := schema["required"]
+		if !ok {
+			optionalCount++
+			continue
+		}
+		var fields []string
+		if err := json.Unmarshal(required, &fields); err != nil || fields == nil {
+			t.Errorf("%s: required debe ser una lista de cadenas, no %s: %v", name, required, err)
+			continue
+		}
+		seen := make(map[string]bool)
+		for _, field := range fields {
+			if seen[field] {
+				t.Errorf("%s: required duplicado %s", name, field)
+			}
+			seen[field] = true
+			if _, present := properties[field]; !present {
+				t.Errorf("%s: required refiere a propiedad ausente %s", name, field)
+			}
+		}
+	}
+	if optionalCount == 0 {
+		t.Fatal("se esperaba herramientas sin argumentos obligatorios")
+	}
+}

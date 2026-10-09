@@ -114,6 +114,13 @@ Compila un único ejecutable; cuando se usa Cloudflare, KagMCP descarga y verifi
 
 ## Solucionar «Authentication succeeded, action discovery failed»
 
+**Segundo problema corregido:** el endpoint `tools/list` emitía esquemas inválidos con `"required": null` para las herramientas sin argumentos. El validador detectó esta incompatibilidad de JSON Schema, y la nueva versión **omite** esa propiedad cuando no corresponde. También hay pruebas contra la respuesta HTTP después de OAuth.
+
+**Actualizar el notebook no es suficiente y tampoco es necesario si sus celdas ya ejecutan Git clone/fetch y build:** es indispensable ejecutar nuevamente las celdas `clonar` (actualizar código de `main`), `compilar` (crear binario nuevo) y finalmente `run`. Si solo repites la celda `run`, inicias el mismo binario anterior.
+
+**SSH opcional:** si no lo utilizas, crea un Secret `SSH_ENABLED=false` para evitar que servicios SSH guardados se activen automáticamente. La presencia de logs SSH es independiente de la corrección del esquema MCP.
+
+
 KagMCP admite tanto el protocolo MCP **2026-07-28** con `server/discover` (stateless) como los clientes que usan `initialize` y `tools/list` de 2025. Los cambios en la autenticación OAuth y los Secrets no son necesarios.
 
 Si autorizaste la versión anterior y ChatGPT muestra ese error, **detén la celda actual**, vuelve a ejecutar las celdas del notebook **clonar → compilar → validación → run** y utiliza la URL HTTPS `.../mcp` que aparece en los nuevos logs. Repite el análisis de herramientas en ChatGPT; si el Quick Tunnel creó otra URL, actualiza/recrea esa conexión.

@@ -178,6 +178,23 @@ func TestOAuthThenActionDiscoveryModern(t *testing.T) {
 		if !ok || tool["name"] == "" || tool["inputSchema"] == nil {
 			t.Fatalf("esquema herramienta incorrecto: %+v", item)
 		}
+		schema, ok := tool["inputSchema"].(map[string]any)
+		if !ok || schema["type"] != "object" {
+			t.Fatalf("schema inválido en %s: %+v", tool["name"], tool["inputSchema"])
+		}
+		// Validación sobre el JSON de la respuesta HTTP real; JSON null
+		// no es una lista válida en la palabra clave JSON Schema required.
+		if rawRequired, exists := schema["required"]; exists {
+			required, ok := rawRequired.([]any)
+			if !ok {
+				t.Fatalf("tool %s: required no es array: %#v", tool["name"], rawRequired)
+			}
+			for _, value := range required {
+				if _, ok := value.(string); !ok {
+					t.Fatalf("tool %s: required contiene no-string", tool["name"])
+				}
+			}
+		}
 	}
 	code, called := postMCPAuthenticated(t, server, token, "tools/call", modernProtocol, modernParams(map[string]any{"name": "environment_info", "arguments": map[string]any{}}), "environment_info")
 	if code != 200 {

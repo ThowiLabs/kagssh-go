@@ -282,8 +282,15 @@ func toolResult(data any, err error) any {
 	return map[string]any{"content": []any{map[string]string{"type": "text", "text": string(b)}}, "isError": false}
 }
 func def(name, desc string, properties map[string]any, required ...string) any {
-	return map[string]any{"name": name, "description": desc, "inputSchema": map[string]any{
-		"type": "object", "properties": properties, "required": required, "additionalProperties": false}}
+	schema := map[string]any{
+		"type": "object", "properties": properties, "additionalProperties": false,
+	}
+	// JSON Schema requiere un array en "required"; nil se serializa a
+	// JSON null, lo cual provoca fallo al descubrir las herramientas.
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return map[string]any{"name": name, "description": desc, "inputSchema": schema}
 }
 func stringProp(desc string) any { return map[string]string{"type": "string", "description": desc} }
 func (s *Server) definitions() []any {
