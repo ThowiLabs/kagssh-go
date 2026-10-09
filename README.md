@@ -112,6 +112,14 @@ python scripts/check_notebook.py
 
 Compila un único ejecutable; cuando se usa Cloudflare, KagMCP descarga y verifica la utilidad oficial `cloudflared` como proceso auxiliar de transporte. No necesita Python para el servidor: Python solo prepara/ejecuta el binario desde el notebook.
 
+## Solucionar «Authentication succeeded, action discovery failed»
+
+KagMCP admite tanto el protocolo MCP **2026-07-28** con `server/discover` (stateless) como los clientes que usan `initialize` y `tools/list` de 2025. Los cambios en la autenticación OAuth y los Secrets no son necesarios.
+
+Si autorizaste la versión anterior y ChatGPT muestra ese error, **detén la celda actual**, vuelve a ejecutar las celdas del notebook **clonar → compilar → validación → run** y utiliza la URL HTTPS `.../mcp` que aparece en los nuevos logs. Repite el análisis de herramientas en ChatGPT; si el Quick Tunnel creó otra URL, actualiza/recrea esa conexión.
+
+La salida del binario registra `descubrimiento MCP` con el nombre de los métodos `server/discover`, `initialize` o `tools/list`, sin registrar tokens ni argumentos. Si vuelve a fallar, aporta solo esos logs y el estado HTTP, nunca credenciales. La compatibilidad está verificada localmente con pruebas del protocolo y flujo real OAuth/PKCE, pero no sustituye una prueba de extremo a extremo en el runtime Kaggle.
+
 ## Seguridad y límites
 
 - OAuth con PIN, PKCE, metadata de descubrimiento, protección de autorización y límites de solicitudes, heredados y adaptados de [Lilith-MCP](https://github.com/YahirHub/Lilith-MCP).

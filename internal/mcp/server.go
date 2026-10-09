@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -24,7 +25,8 @@ import (
 	"github.com/ThowiLabs/kagssh-go/internal/securefs"
 )
 
-const protocol = "2025-11-25"
+const protocol = "2025-11-25"       // Transporte legado compatible con initialize.
+const modernProtocol = "2026-07-28" // Discovery stateless; la versión no depende de una sesión.
 const maxBody = 1 << 20
 
 type request struct {
@@ -123,8 +125,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	return err
 }
+
+// ServeHTTP mantiene el handshake heredado y también admite MCP 2026-07-28
+// stateless. OAuth se valida antes de procesar métodos o herramientas.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Rechazar Origin remoto que no corresponde al URL autorizado.
 	if origin := r.Header.Get("Origin"); origin != "" && origin != s.public {
 		http.Error(w, "Origin no permitido", http.StatusForbidden)
 		return
@@ -139,40 +143,101 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "autenticación requerida", http.StatusUnauthorized)
 		return
 	}
-	if version := r.Header.Get("MCP-Protocol-Version"); version != "" && version != protocol && version != "2025-03-26" {
-		http.Error(w, "versión de MCP no compatible", http.StatusBadRequest)
-		return
-	}
-	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
 		http.Error(w, "Content-Type debe ser application/json", http.StatusUnsupportedMediaType)
 		return
 	}
 	body := http.MaxBytesReader(w, r.Body, maxBody)
 	defer body.Close()
+	dec := json.NewDecoder(body)
 	var req request
-	if err := json.NewDecoder(body).Decode(&req); err != nil {
-		s.rpc(w, response{JSONRPC: "2.0", Error: &rpcError{-32700, "JSON no válido"}})
+	if err := dec.Decode(&req); err != nil {
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", Error: &rpcError{-32700, "JSON no válido"}})
+		return
+	}
+	if dec.Decode(new(any)) != io.EOF {
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32600, "se admite un mensaje JSON-RPC por solicitud"}})
 		return
 	}
 	if req.JSONRPC != "2.0" || req.Method == "" {
-		s.rpc(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32600, "petición inválida"}})
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32600, "petición inválida"}})
 		return
 	}
+	// La versión se negocia por petición; la URL MCP no mantiene sesiones.
+	version := r.Header.Get("MCP-Protocol-Version")
+	modern := version == modernProtocol
+	if req.Method == "server/discover" || req.Method == "tools/list" || req.Method == "initialize" {
+		// Sólo nombres de métodos conocidos, nunca contenido de herramientas o tokens.
+		slog.Info("descubrimiento MCP", "method", req.Method, "protocol", version)
+	}
+	switch version {
+	case "", protocol, "2025-03-26", modernProtocol:
+	default:
+		s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32022, "versión MCP no compatible"}})
+		return
+	}
+	if modern {
+		// MCP 2026-07-28 exige coherencia entre las cabeceras espejadas y
+		// los datos del mensaje. Nunca confiamos en un header sin compararlo.
+		if r.Header.Get("Mcp-Method") != req.Method {
+			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32020, "Mcp-Method no coincide con el cuerpo"}})
+			return
+		}
+		var params struct {
+			Name string `json:"name"`
+			Meta struct {
+				Protocol     string          `json:"io.modelcontextprotocol/protocolVersion"`
+				Capabilities json.RawMessage `json:"io.modelcontextprotocol/clientCapabilities"`
+			} `json:"_meta"`
+		}
+		if len(req.Params) == 0 || json.Unmarshal(req.Params, &params) != nil || params.Meta.Protocol != modernProtocol || len(params.Meta.Capabilities) == 0 {
+			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32020, "metadata MCP 2026 ausente o no coincide con MCP-Protocol-Version"}})
+			return
+		}
+		if req.Method == "tools/call" && (params.Name == "" || r.Header.Get("Mcp-Name") != params.Name) {
+			s.rpcStatus(w, http.StatusBadRequest, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32020, "Mcp-Name no coincide con la herramienta"}})
+			return
+		}
+	} else if req.Method == "server/discover" {
+		// La versión 2025-11-25 no define server/discover.
+		s.rpc(w, response{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{-32601, "Method not found"}})
+		return
+	}
+	// Las notificaciones nunca tienen ID; no se emite un objeto JSON-RPC.
 	if len(req.ID) == 0 {
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 	resp := response{JSONRPC: "2.0", ID: req.ID}
 	switch req.Method {
+	case "server/discover":
+		// En el protocolo 2026, las capacidades y la identidad deben
+		// reflejar las herramientas reales, sin inventar otras capacidades.
+		resp.Result = map[string]any{
+			"resultType":        "complete",
+			"supportedVersions": []string{modernProtocol, protocol},
+			"capabilities":      map[string]any{"tools": map[string]any{"listChanged": false}},
+			"_meta":             map[string]any{"io.modelcontextprotocol/serverInfo": map[string]string{"name": "kagmcp", "title": "KagMCP", "version": "0.2.0"}},
+			"instructions":      mcpInstructions,
+			"ttlMs":             30000,
+			"cacheScope":        "private",
+		}
 	case "initialize":
 		resp.Result = map[string]any{"protocolVersion": protocol,
 			"capabilities": map[string]any{"tools": map[string]any{"listChanged": false}},
-			"serverInfo":   map[string]string{"name": "kagmcp", "title": "KagMCP", "version": "0.1.0"},
-			"instructions": "Herramientas directas dentro de una sesión Kaggle autorizada. Los archivos de trabajo están en /kaggle/working; los datasets de /kaggle/input son de solo lectura. Confirma acciones destructivas. Nunca publiques credenciales, Secrets ni contenido privado."}
+			"serverInfo":   map[string]string{"name": "kagmcp", "title": "KagMCP", "version": "0.2.0"},
+			"instructions": mcpInstructions}
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		resp.Result = map[string]any{"tools": s.definitions()}
+		out := map[string]any{"tools": s.definitions()}
+		if modern {
+			out["resultType"] = "complete"
+			out["ttlMs"] = 30000
+			out["cacheScope"] = "private"
+		}
+		resp.Result = out
 	case "tools/call":
 		var call struct {
 			Name      string          `json:"name"`
@@ -183,16 +248,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			out, err := s.invoke(r.Context(), call.Name, call.Arguments)
 			resp.Result = toolResult(out, err)
+			if modern {
+				resp.Result.(map[string]any)["resultType"] = "complete"
+			}
 		}
 	default:
 		resp.Error = &rpcError{-32601, "método desconocido"}
 	}
 	s.rpc(w, resp)
 }
+
+const mcpInstructions = "Herramientas directas dentro de una sesión Kaggle autorizada. Los archivos de trabajo están en /kaggle/working; los datasets de /kaggle/input son de solo lectura. Confirma acciones destructivas. Nunca publiques credenciales, Secrets ni contenido privado."
+
 func (s *Server) rpc(w http.ResponseWriter, v response) {
+	s.rpcStatus(w, http.StatusOK, v)
+}
+
+func (s *Server) rpcStatus(w http.ResponseWriter, status int, v response) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 func toolResult(data any, err error) any {
