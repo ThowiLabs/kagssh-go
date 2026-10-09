@@ -22,6 +22,7 @@ import (
 	"github.com/ThowiLabs/kagssh-go/internal/dashboard"
 	"github.com/ThowiLabs/kagssh-go/internal/diskguard"
 	"github.com/ThowiLabs/kagssh-go/internal/githubtoken"
+	"github.com/ThowiLabs/kagssh-go/internal/gpumetrics"
 	"github.com/ThowiLabs/kagssh-go/internal/oauth"
 	"github.com/ThowiLabs/kagssh-go/internal/pinauth"
 	"github.com/ThowiLabs/kagssh-go/internal/projectstate"
@@ -364,6 +365,11 @@ func (s *Server) definitions() []any {
 		def("skills_read", "Lee Ponytail v2 u otra Skill en fragmentos", map[string]any{"name": stringProp("ID de Skill"), "offset": map[string]any{"type": "integer"}}, "name"),
 		def("skills_search", "Busca texto en Skills", map[string]any{"query": stringProp("Texto a buscar")}, "query"),
 		def("skills_install", "Instala Skill personalizada privada", map[string]any{"name": stringProp("ID de Skill"), "content": stringProp("Markdown de Skill")}, "name", "content"),
+
+		def("gpu_detect", "Detectar GPUs NVIDIA disponibles en Kaggle: modelo, UUID, índice, versión del driver y VRAM total. Informa si nvidia-smi no está disponible.", map[string]any{}),
+		def("gpu_metrics", "Métricas actuales de TODAS las GPUs NVIDIA: porcentaje de uso GPU y memoria, VRAM total/usada/libre, temperatura, energía, ventilador y estado de rendimiento.", map[string]any{}),
+		def("gpu_processes", "Procesos de cómputo que usan GPU, con PID, nombre, UUID y VRAM MiB. Visibilidad compartida en Kaggle; no modifica procesos.", map[string]any{}),
+		def("gpu_monitor", "Muestrear utilización, VRAM, temperatura y potencia NVIDIA a intervalos, hasta 10 muestras y 20 segundos. Sin tareas persistentes.", map[string]any{"samples": map[string]any{"type": "integer", "description": "Número de muestras, 1 a 10"}, "interval_seconds": map[string]any{"type": "integer", "description": "Separación entre muestras, 1 a 5 segundos"}}, "samples", "interval_seconds"),
 		def("environment_info", "Información del runtime Kaggle sin credenciales", map[string]any{}),
 		def("list_dir", "Lista directorios en /kaggle/working o /kaggle/input", map[string]any{"path": stringProp("Ruta de Kaggle")}),
 		def("read_file", "Lee un archivo de texto Kaggle hasta 1 MiB", map[string]any{"path": stringProp("Ruta a leer")}, "path"),
@@ -401,6 +407,9 @@ func (s *Server) definitions() []any {
 	}
 }
 func (s *Server) invoke(ctx context.Context, name string, raw json.RawMessage) (any, error) {
+	if gpuTool(name) {
+		return invokeGPU(ctx, name, raw, gpumetrics.New())
+	}
 	if githubExtendedTool(name) {
 		return s.invokeGitHubExtended(ctx, name, raw)
 	}

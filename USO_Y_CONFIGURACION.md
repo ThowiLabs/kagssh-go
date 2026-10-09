@@ -281,3 +281,31 @@ Crear un repo **privado** requiere `github_repo_create` con `name` y `private=tr
 Eliminar repositorios, ramas, archivos, fusionar PR y cambiar permisos son acciones potencialmente irreversibles: los agentes deben **pedir autorización explícita** antes de realizarlas. No compartas PAT ni lo insertes en `endpoint` o en registros de comandos. Un PAT con poderes administrativos compartido con agentes tiene un riesgo alto: limita repositorios y permisos cuando sea posible.
 
 **Límites actuales:** máximo de 1 MiB para solicitudes JSON `github_api` y 2 MiB para la respuesta JSON por llamada. Para repositorios completos y commits múltiples, usa los endpoints Git Trees/Git Commits con varias llamadas o Git de la shell local. Release assets binarios y ciertos endpoints de cargas multimedia necesitan lógica de subida distinta y no están cubiertos por el cliente JSON genérico.
+
+## GPU en Kaggle mediante MCP
+
+KagMCP incorpora cuatro herramientas de telemetría NVIDIA sin dependencias Python, sin instalar CUDA ni ejecutar comandos arbitrarios. El backend utiliza `nvidia-smi` **solo en lectura**, con argumentos fijos, una consulta por operación y un límite de 6 segundos para cada llamada al programa.
+
+| Herramienta MCP | Uso |
+|---|---|
+| `gpu_detect` | Detecta todas las GPU NVIDIA visibles: índice, nombre, UUID, versión de controlador, bus PCI y VRAM total (MiB) |
+| `gpu_metrics` | Consulta cada GPU: utilización de núcleos y memoria (%), VRAM total/usada/libre (MiB), VRAM usada (%), temperatura (°C), energía/potencia (W), límite de potencia, ventilador y estado de rendimiento |
+| `gpu_processes` | Enumera procesos de cómputo que NVIDIA permite consultar: UUID, PID, nombre y VRAM utilizada (MiB) |
+| `gpu_monitor` | Devuelve entre 1 y 10 muestras consecutivas de `gpu_metrics`, separadas entre 1 y 5 segundos, con duración nominal no superior a 20 segundos y límite de 30 segundos en total |
+
+**Kaggle con GPU desactivada:** estas herramientas no activan la GPU automáticamente. En la configuración del notebook selecciona **Accelerator → GPU**, reinicia el entorno y vuelve a ejecutar `clonar → compilar → configurar → validación → run`. Si `nvidia-smi` falta o no puede comunicarse con el controlador, la respuesta se entrega estructurada con `available=false`, `status`, `reason` y `hint` en lugar de inventar métricas. Un estado `driver_or_query_error` no demuestra por sí solo que Kaggle haya desactivado la GPU.
+
+Los campos no soportados por una tarjeta/controlador (`N/A`) se muestran como valores omitidos o nulos; **no se convierten falsamente en 0**. Una GPU puede existir, pero no mostrar mediciones como potencia, ventilador o utilización bajo MIG. Los porcentajes y potencias son lecturas puntuales, no un historial permanente.
+
+Ejemplos para agentes MCP:
+
+```json
+{"name":"gpu_detect","arguments":{}}
+{"name":"gpu_metrics","arguments":{}}
+{"name":"gpu_processes","arguments":{}}
+{"name":"gpu_monitor","arguments":{"samples":5,"interval_seconds":2}}
+```
+
+En runtimes con varios agentes, la GPU puede estar compartida: `gpu_processes` muestra los procesos de cómputo accesibles a `nvidia-smi` del entorno, **no atribuye propiedad ni permisos al agente que los creó**. Las herramientas nunca matan procesos, cambian potencia, hacen overclock o escriben archivos. No existe un monitor residente ni se crea historial permanente en disco.
+
+Se probó localmente la lógica contra respuestas simuladas de 2 Tesla T4, ausencia de `nvidia-smi`, errores del driver, mediciones N/A, varias aplicaciones y cancelación del monitor. El consumo real de una GPU Kaggle requiere probar el notebook con Accelerator GPU activado.
