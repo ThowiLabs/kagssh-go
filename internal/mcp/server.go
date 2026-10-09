@@ -19,10 +19,15 @@ import (
 	"time"
 
 	"github.com/ThowiLabs/kagssh-go/internal/config"
+	"github.com/ThowiLabs/kagssh-go/internal/dashboard"
+	"github.com/ThowiLabs/kagssh-go/internal/diskguard"
 	"github.com/ThowiLabs/kagssh-go/internal/githubtoken"
 	"github.com/ThowiLabs/kagssh-go/internal/oauth"
+	"github.com/ThowiLabs/kagssh-go/internal/projectstate"
 	"github.com/ThowiLabs/kagssh-go/internal/quicktunnel"
 	"github.com/ThowiLabs/kagssh-go/internal/securefs"
+	"github.com/ThowiLabs/kagssh-go/internal/skills"
+	"sync"
 )
 
 const protocol = "2025-11-25"       // Transporte legado compatible con initialize.
@@ -46,10 +51,14 @@ type response struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 type Server struct {
-	cfg    config.Config
-	public string
-	auth   *oauth.Server
-	github *githubtoken.Client
+	cfg      config.Config
+	public   string
+	auth     *oauth.Server
+	githubMu sync.RWMutex
+	github   *githubtoken.Client
+	githubOn bool
+	projects *projectstate.Store
+	skills   skills.Registry
 }
 
 func New(cfg config.Config, public string) (*Server, error) {
@@ -65,12 +74,17 @@ func New(cfg config.Config, public string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("autorización MCP: %w", err)
 	}
-	return &Server{cfg: cfg, public: public, auth: auth, github: githubtoken.New(cfg.GitHubToken)}, nil
+	projects, err := projectstate.Open(filepath.Join(cfg.DataDir, "projects.json"))
+	if err != nil {
+		return nil, fmt.Errorf("cargar proyectos: %w", err)
+	}
+	return &Server{cfg: cfg, public: public, auth: auth, github: githubtoken.New(cfg.GitHubToken), githubOn: cfg.GitHubToken != "", projects: projects, skills: skills.Registry{Dir: filepath.Join(cfg.DataDir, "skills")}}, nil
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.auth.RegisterRoutes(mux)
 	mux.Handle("/mcp", s)
+	mux.Handle("/", dashboard.New(s.public, s.cfg.MCPAccessPIN, s.projects, s.skills, s.configureGitHub, s.githubConfigured, s.projectExport))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "KagMCP OK\n")
@@ -109,7 +123,29 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
-	log.Info("KagMCP listo para conectar cliente MCP", "url", public+"/mcp", "tunnel", cfg.MCPTunnel, "github_token_configurado", cfg.GitHubToken != "")
+	log.Info("KagMCP listo para conectar cliente MCP", "url", public+"/mcp", "panel_web", public+"/", "tunnel", cfg.MCPTunnel, "github_token_configurado", cfg.GitHubToken != "")
+	// Vigilar el almacenamiento durante toda la vida del runtime.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		warned := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				err := diskguard.Check("/kaggle/working")
+				if err != nil && !warned {
+					log.Error("espacio crítico: detener instalaciones/escrituras", "error", err)
+					warned = true
+				}
+				if err == nil && warned {
+					log.Info("espacio de trabajo recuperado")
+					warned = false
+				}
+			}
+		}
+	}()
 	stopped := make(chan struct{})
 	go func() {
 		select {
@@ -258,7 +294,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.rpc(w, resp)
 }
 
-const mcpInstructions = "Herramientas directas dentro de una sesión Kaggle autorizada. Los archivos de trabajo están en /kaggle/working; los datasets de /kaggle/input son de solo lectura. Confirma acciones destructivas. Nunca publiques credenciales, Secrets ni contenido privado."
+const mcpInstructions = skills.Summary + " Ejecuta skills_read(ponytail-v2) al iniciar trabajo. En Kaggle cada prueba termina con repositorio Git y notebook funcional; después de verificarlos, una UI Gradio. Fija versiones, vigila espacio libre para evitar readonly, registra descripción/proyecto de comandos, memoria y tareas. Los datos de /kaggle/input solo lectura. No reveles secretos."
 
 func (s *Server) rpc(w http.ResponseWriter, v response) {
 	s.rpcStatus(w, http.StatusOK, v)
@@ -295,11 +331,24 @@ func def(name, desc string, properties map[string]any, required ...string) any {
 func stringProp(desc string) any { return map[string]string{"type": "string", "description": desc} }
 func (s *Server) definitions() []any {
 	return []any{
+		def("skills_list", "Lista Skills disponibles; Ponytail v2 siempre activa", map[string]any{}),
+		def("skills_read", "Lee Ponytail v2 u otra Skill en fragmentos", map[string]any{"name": stringProp("ID de Skill"), "offset": map[string]any{"type": "integer"}}, "name"),
+		def("skills_search", "Busca texto en Skills", map[string]any{"query": stringProp("Texto a buscar")}, "query"),
+		def("skills_install", "Instala Skill personalizada privada", map[string]any{"name": stringProp("ID de Skill"), "content": stringProp("Markdown de Skill")}, "name", "content"),
 		def("environment_info", "Información del runtime Kaggle sin credenciales", map[string]any{}),
 		def("list_dir", "Lista directorios en /kaggle/working o /kaggle/input", map[string]any{"path": stringProp("Ruta de Kaggle")}),
 		def("read_file", "Lee un archivo de texto Kaggle hasta 1 MiB", map[string]any{"path": stringProp("Ruta a leer")}, "path"),
 		def("write_file", "Escribe un archivo en /kaggle/working hasta 1 MiB", map[string]any{"path": stringProp("Ruta a escribir"), "content": stringProp("Contenido completo")}, "path", "content"),
-		def("exec", "Ejecuta un comando en el runtime Kaggle con timeout y salida limitada", map[string]any{"command": stringProp("Comando shell"), "cwd": stringProp("Directorio de trabajo en /kaggle/working")}, "command"),
+		def("exec", "Ejecuta un comando en el runtime Kaggle con timeout y salida limitada", map[string]any{"command": stringProp("Comando shell"), "cwd": stringProp("Directorio de trabajo en /kaggle/working"), "project": stringProp("ID de proyecto, para historial"), "description": stringProp("Descripción del propósito del comando")}, "command", "description"),
+		def("projects_list", "Lista los proyectos y su memoria/tareas compartidas", map[string]any{}),
+		def("project_create", "Crea un proyecto multiagente", map[string]any{"project": stringProp("ID único"), "title": stringProp("Nombre"), "repository": stringProp("owner/repo"), "notebook": stringProp("ruta al .ipynb")}, "project", "title"),
+		def("project_memory_add", "Guarda una decisión técnica persistente", map[string]any{"project": stringProp("ID del proyecto"), "content": stringProp("Nota de contexto")}, "project", "content"),
+		def("project_export", "Exporta memoria y tareas al repo para versionarlas", map[string]any{"project": stringProp("ID del proyecto")}, "project"),
+		def("project_import", "Restaura memoria y tareas desde contexto JSON versionado en Git", map[string]any{"project": stringProp("ID de proyecto")}, "project"),
+		def("tasks_add", "Añade una tarea del proyecto", map[string]any{"project": stringProp("ID"), "title": stringProp("Tarea")}, "project", "title"),
+		def("tasks_update", "Actualiza tarea pending/in_progress/done", map[string]any{"project": stringProp("ID"), "task": stringProp("ID tarea"), "status": stringProp("Estado")}, "project", "task", "status"),
+		def("history_list", "Consulta historial de comandos con descripción", map[string]any{"project": stringProp("ID, opcional")}),
+		def("gradio_scaffold", "Solo tras verificar pruebas, genera Gradio fijado en repo con notebook válido", map[string]any{"project": stringProp("ID de proyecto"), "tests_passed": map[string]any{"type": "boolean"}}, "project", "tests_passed"),
 		def("github_status", "Valida GITHUB_TOKEN y muestra cuenta autenticada", map[string]any{}),
 		def("github_repositories", "Lista repositorios accesibles con GITHUB_TOKEN (100 recientes)", map[string]any{}),
 		def("github_branches", "Lista ramas de un repositorio", map[string]any{"repository": stringProp("owner/repo")}, "repository"),
@@ -308,16 +357,21 @@ func (s *Server) definitions() []any {
 	}
 }
 func (s *Server) invoke(ctx context.Context, name string, raw json.RawMessage) (any, error) {
+	if managementTool(name) {
+		return s.invokeManagement(ctx, name, raw)
+	}
 	var a struct {
-		Path       string `json:"path"`
-		Content    string `json:"content"`
-		Command    string `json:"command"`
-		Cwd        string `json:"cwd"`
-		Repository string `json:"repository"`
-		Ref        string `json:"ref"`
-		Branch     string `json:"branch"`
-		Message    string `json:"message"`
-		SHA        string `json:"sha"`
+		Path        string `json:"path"`
+		Content     string `json:"content"`
+		Command     string `json:"command"`
+		Project     string `json:"project"`
+		Description string `json:"description"`
+		Cwd         string `json:"cwd"`
+		Repository  string `json:"repository"`
+		Ref         string `json:"ref"`
+		Branch      string `json:"branch"`
+		Message     string `json:"message"`
+		SHA         string `json:"sha"`
 	}
 	if len(raw) > 0 && string(raw) != "null" {
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -327,7 +381,7 @@ func (s *Server) invoke(ctx context.Context, name string, raw json.RawMessage) (
 	switch name {
 	case "environment_info":
 		hostname, _ := os.Hostname()
-		return map[string]any{"platform": "kaggle", "hostname": hostname, "working": "/kaggle/working", "datasets": "/kaggle/input", "mcp_url": s.public + "/mcp", "github_configured": s.cfg.GitHubToken != "", "ssh_enabled": s.cfg.SSHEnabled}, nil
+		return map[string]any{"platform": "kaggle", "hostname": hostname, "working": "/kaggle/working", "datasets": "/kaggle/input", "mcp_url": s.public + "/mcp", "github_configured": s.githubConfigured(), "ssh_enabled": s.cfg.SSHEnabled, "always_active_skill": skills.Active, "project_count": len(s.projects.Snapshot().Projects), "web_ui": s.public + "/"}, nil
 	case "list_dir":
 		return s.listDir(a.Path)
 	case "read_file":
@@ -335,17 +389,17 @@ func (s *Server) invoke(ctx context.Context, name string, raw json.RawMessage) (
 	case "write_file":
 		return s.writeFile(a.Path, a.Content)
 	case "exec":
-		return s.exec(ctx, a.Command, a.Cwd)
+		return s.execWithAudit(ctx, a.Command, a.Cwd, a.Project, a.Description)
 	case "github_status":
-		return s.github.Status(ctx)
+		return s.githubClient().Status(ctx)
 	case "github_repositories":
-		return s.github.Repos(ctx)
+		return s.githubClient().Repos(ctx)
 	case "github_branches":
-		return s.github.Branches(ctx, a.Repository)
+		return s.githubClient().Branches(ctx, a.Repository)
 	case "github_file_read":
-		return s.github.ReadFile(ctx, a.Repository, a.Path, a.Ref)
+		return s.githubClient().ReadFile(ctx, a.Repository, a.Path, a.Ref)
 	case "github_file_write":
-		return s.github.WriteFile(ctx, a.Repository, a.Path, a.Branch, a.Message, a.Content, a.SHA)
+		return s.githubClient().WriteFile(ctx, a.Repository, a.Path, a.Branch, a.Message, a.Content, a.SHA)
 	}
 	return nil, errors.New("herramienta desconocida")
 }
@@ -441,6 +495,9 @@ func (s *Server) writeFile(raw, content string) (any, error) {
 	if len(content) > 1<<20 {
 		return nil, errors.New("escritura limitada a 1 MiB")
 	}
+	if err := diskguard.Check(path); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
@@ -480,6 +537,9 @@ func (s *Server) exec(ctx context.Context, command, cwd string) (any, error) {
 	if !stat.IsDir() {
 		return nil, errors.New("cwd no es un directorio")
 	}
+	if err := diskguard.Check(dir); err != nil {
+		return nil, err
+	}
 	taskCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	shell := "/bin/bash"
@@ -497,8 +557,36 @@ func (s *Server) exec(ctx context.Context, command, cwd string) (any, error) {
 	output := &limitedWriter{max: 65536}
 	cmd.Stdout = output
 	cmd.Stderr = output
+	// Control continuo de almacenamiento durante el comando; si se agota,
+	// cancela el shell antes de que Kaggle pueda quedar readonly.
+	watchStop := make(chan struct{})
+	watchErr := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchStop:
+				return
+			case <-taskCtx.Done():
+				return
+			case <-ticker.C:
+				if e := diskguard.Check(dir); e != nil {
+					watchErr <- e
+					cancel()
+					return
+				}
+			}
+		}
+	}()
 	err = cmd.Run()
+	close(watchStop)
 	result := map[string]any{"output": output.b.String(), "truncated": output.b.Len() == 65536}
+	select {
+	case e := <-watchErr:
+		return result, e
+	default:
+	}
 	if taskCtx.Err() != nil {
 		result["timeout"] = true
 		return result, errors.New("comando cancelado o excedió 45s")

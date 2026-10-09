@@ -151,3 +151,47 @@ KagMCP admite tanto el protocolo MCP **2026-07-28** con `server/discover` (state
 Si autorizaste la versión anterior y ChatGPT muestra ese error, **detén la celda actual**, vuelve a ejecutar las celdas del notebook **clonar → compilar → validación → run** y utiliza la URL HTTPS `.../mcp` que aparece en los nuevos logs. Repite el análisis de herramientas en ChatGPT; si el Quick Tunnel creó otra URL, actualiza/recrea esa conexión.
 
 La salida del binario registra `descubrimiento MCP` con el nombre de los métodos `server/discover`, `initialize` o `tools/list`, sin registrar tokens ni argumentos. Si vuelve a fallar, aporta solo esos logs y el estado HTTP, nunca credenciales. La compatibilidad está verificada localmente con pruebas del protocolo y flujo real OAuth/PKCE, pero no sustituye una prueba de extremo a extremo en el runtime Kaggle.
+
+## 9. Portal web y proyectos
+
+En la salida de la celda `run` se mostrarán:
+
+```text
+url=https://subdominio.trycloudflare.com/mcp
+panel_web=https://subdominio.trycloudflare.com/
+```
+
+La segunda URL abre la administración del servidor. Usa **el PIN MCP introducido en la celda configurar**. Después del login puedes crear proyectos (ID igual al nombre de su carpeta bajo `/kaggle/working`), consultar sus notas, crear/cambiar tareas, leer historial, recorrer Ponytail v2 y configurar o borrar el PAT de GitHub sin almacenarlo en disco.
+
+El panel **no es Gradio**: está implementado en Go para compartir el mismo HTTP/OAuth y no instalar paquetes Python innecesarios en el proceso principal. Los proyectos que desarrolles mediante KagMCP sí deberán terminar con una **interfaz Gradio real después de verificar** repositorio Git y notebook.
+
+Login: máximo cinco intentos fallidos por origen en ventana de 15 minutos; límite global, sesiones de ocho horas (máximo cien simultáneas), CSRF, cookies seguras y bloqueo de frames. El PIN no se escribe en ningún archivo. Si pierdes la sesión, vuelve a la raíz y autentícate otra vez.
+
+## 10. Sistema de Skills y memoria multiagente
+
+`ponytail-v2` es la Skill integrada siempre activa, copiada íntegramente de `C:\Users\Admin\Documents\codex-ponytail-v2.md` y ampliada con la regla específica de Kaggle. El contenido está empaquetado dentro del ejecutable Go. Se carga en fragmentos mediante `skills_read`; otras Skills se instalan con `skills_install` y se guardan en `/kaggle/working/.kagmcp/skills`.
+
+Reglas obligatorias durante trabajos de Kaggle:
+
+1. Registrar **proyecto**, objetivo, repositorio, notebook, tareas, decisiones y descripción de cada comando.
+2. Crear/corregir **el repositorio Git y el notebook `.ipynb`** de manera coherente. Ejecutar y registrar pruebas reales.
+3. Bloquear dependencias directas y transitivas, versiones de Python/modelos y SHA de artefactos cuando estén disponibles; no instalar versiones abiertas que cambian cada día.
+4. Vigilar `df -h` y el disco durante todo el proceso: si se agota puede activarse el modo `readonly`.
+5. Una vez que repositorio y notebook estén verificados, crear y **conectar una UI Gradio a la lógica del proyecto**. El tool `gradio_scaffold` comprueba Git y JSON de notebook y genera plantilla con `gradio==6.30.0`; debe personalizarse y comprobarse, no constituye una UI terminada.
+6. Exportar memoria y tareas vía `project_export` al contexto del repositorio y versionarlo en GitHub.
+
+Estado privado en `/kaggle/working/.kagmcp/projects.json`. Varios agentes conectados al **mismo KagMCP** ven el mismo almacenamiento y las escrituras quedan serializadas. Para continuidad real entre sesiones Kaggle, sincronizar el contexto relevante en Git (no se automatiza un push sin petición explícita). Memoria: hasta 100 proyectos, 200 notas y 200 tareas por proyecto; el historial conserva 1 000 acciones recientes, sin stdout y con ocultación preventiva de comandos potencialmente sensibles.
+
+## 11. Seguridad del almacenamiento y dependencias Gradio
+
+Los guardarraíles de disco rechazan escrituras o ejecución si el volumen de trabajo tiene menos de 512 MiB libres o menos del 3 % de capacidad disponible. El monitor vuelve a revisar cada 5 segundos y controla comandos cada 2 segundos. **No sustituye las cuotas del proveedor ni puede impedir al 100 % escrituras rápidas o externas**.
+
+Para Gradio, primero genera y personaliza `app.py`, `requirements-gradio.in` y `GRADIO_REPRODUCIBLE.md` tras verificar el proyecto. Bloquea dependencias transitivas con hashes desde entorno limpio y registra el archivo `requirements-gradio.lock` en el repositorio. Ejecuta `python -m pip install --require-hashes --no-cache-dir -r requirements-gradio.lock`; no instales desde un requerimiento abierto sin versión.
+
+El PAT de GitHub configurado desde el panel se verifica contra la API y solo queda en memoria. Para recuperarlo en una nueva sesión del notebook, vuelve a introducirlo mediante `getpass` con `USE_GITHUB=True` o desde el panel después de conectar. Nunca pongas el PAT en el repo.
+
+### Recuperación comprobable al cambiar de runtime
+
+`project_export` (también disponible en el panel web) escribe **dos archivos** dentro del repositorio del proyecto: `contexto/kagmcp-proyecto.md` legible y `contexto/kagmcp-proyecto.json` restaurable. Tras revisarlos para evitar subir notas sensibles, añade ambos a Git y haz commit/push. En otra sesión, clona ese repositorio y ejecuta **`project_import`** con el ID de la carpeta del proyecto; memoria y tareas vuelven al estado compartido. El historial de comandos permanece local en `.kagmcp/projects.json` y no se exporta automáticamente por seguridad.
+
+El formulario GitHub del panel permite cambiar o quitar el token sin modificar `config.json`; se pierde al reiniciar el proceso. La exportación no realiza `git push` automáticamente.

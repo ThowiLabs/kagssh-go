@@ -133,3 +133,29 @@ La salida del binario registra `descubrimiento MCP` con el nombre de los método
 ## Licencias y procedencia
 
 El código de servidor OAuth, almacenamiento privado y Cloudflare Quick Tunnel procede de la variante `portable-shell` de **Lilith-MCP**, adaptada a este módulo y al flujo de Kaggle. KagMCP mantiene su propia interfaz de herramientas, sistema de configuración y cliente personal de GitHub.
+
+## Ponytail v2, proyectos y panel web
+
+La metodología **Ponytail v2** está integrada **íntegra** en el binario, a partir del archivo local `codex-ponytail-v2.md` (no procede de Lilith). El archivo integrado es `internal/skills/ponytail-v2.md` e incluye una extensión obligatoria para Kaggle: cada proyecto debe terminar con **repositorio Git y notebook funcional**, comprobados mediante pruebas; **después** se genera e integra una UI **Gradio**, con dependencias fijadas, lock de transitivas con hashes y validación de arranque. También obliga a vigilar continuamente el disco para prevenir el estado `readonly`.
+
+Herramientas MCP añadidas:
+
+- `skills_list`, `skills_read`, `skills_search` y `skills_install`. `ponytail-v2` es siempre activa y no se puede sustituir; se puede consultar por fragmentos.
+- `projects_list`, `project_create`, `project_memory_add`, `project_export`, `tasks_add`, `tasks_update`, `history_list`, `gradio_scaffold`.
+- `exec` admite `project` y `description` para auditar las operaciones de cada agente. Los comandos que posiblemente contienen credenciales se ocultan por completo en el historial, y no se almacena stdout.
+
+Al arrancar, el log muestra dos enlaces **del mismo túnel**: `https://...trycloudflare.com/mcp` para clientes MCP y **`https://...trycloudflare.com/`** para el panel. En la raíz `/`, inicia sesión con el **mismo PIN MCP**. El panel permite crear/consultar proyectos, memoria, tareas, historial, leer Skills y **configurar o desconectar el PAT GitHub**. El formulario usa cookies `Secure` + `HttpOnly` + `SameSite=Strict`, protección CSRF y verificación de origen, sesiones de 8 horas, revocación al cerrar sesión y límites de intentos.
+
+La web está implementada en el servidor Go, sin añadir una dependencia Python al servicio principal. **Gradio está reservado a las interfaces funcionales de los proyectos Kaggle**, posteriores a verificar notebook y Git. El generador fija `gradio==6.30.0` y documenta la compilación de `requirements-gradio.lock` con hashes mediante `pip-tools==7.6.2`. La instalación reproducible exige el lock creado y versionado; fijar solamente Gradio no inmoviliza todas sus transitivas.
+
+**Persistencia:** el estado compartido por todos los agentes conectados a **este mismo proceso** se almacena con escritura atómica en `/kaggle/working/.kagmcp/projects.json`, con límites de tamaño (100 proyectos, 200 notas/tareas por proyecto, 1 000 eventos). Persiste entre reinicios del binario mientras siga existiendo el volumen; **no está garantizado entre sesiones de Kaggle**. Ejecuta `project_export` para generar `/kaggle/working/<project_id>/contexto/kagmcp-proyecto.md` y haz commit/push de ese contenido para tener recuperación fuera del runtime. No se guardan contraseñas ni PAT en el estado.
+
+**Disco:** el servidor comprueba periódicamente el almacenamiento de `/kaggle/working`, antes de ejecutar comandos o escribir archivos, y cada 2 segundos durante comandos. Detiene operaciones cuando quedan menos de 512 MiB o el 3 % del volumen. Es protección preventiva, **no** una cuota real de disco ni una garantía absoluta ante programas externos o escrituras muy rápidas.
+
+**Seguridad:** el panel y el MCP comparten PIN pero mantienen autenticación y sesiones diferentes. Las credenciales de GitHub introducidas por web se verifican contra el servicio GitHub y residen solo en memoria del proceso (se pierden al reiniciarlo). Los clientes MCP autorizados pueden ejecutar comandos con los permisos del runtime, incluso root: autoriza exclusivamente agentes de confianza y no expongas el PIN. El origen Cloudflare usa HTTPS; el servidor escucha en loopback.
+
+### Recuperación comprobable al cambiar de runtime
+
+`project_export` (también disponible en el panel web) escribe **dos archivos** dentro del repositorio del proyecto: `contexto/kagmcp-proyecto.md` legible y `contexto/kagmcp-proyecto.json` restaurable. Tras revisarlos para evitar subir notas sensibles, añade ambos a Git y haz commit/push. En otra sesión, clona ese repositorio y ejecuta **`project_import`** con el ID de la carpeta del proyecto; memoria y tareas vuelven al estado compartido. El historial de comandos permanece local en `.kagmcp/projects.json` y no se exporta automáticamente por seguridad.
+
+El formulario GitHub del panel permite cambiar o quitar el token sin modificar `config.json`; se pierde al reiniciar el proceso. La exportación no realiza `git push` automáticamente.
