@@ -12,6 +12,7 @@ import (
 	"github.com/ThowiLabs/kagssh-go/internal/projectstate"
 	"github.com/ThowiLabs/kagssh-go/internal/skills"
 	"html/template"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -66,7 +67,11 @@ func (h *Handler) security(w http.ResponseWriter) {
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 	w.Header().Set("Cache-Control", "no-store")
 }
-func (h *Handler) sameOrigin(r *http.Request) bool { return r.Header.Get("Origin") == h.Public }
+
+// La cabecera Origin puede ser modificada u omitida por los túneles
+// Gradio FRP/Cloudflare. La autenticación del navegador descansa en una
+// cookie __Host privada SameSite=Strict y un token CSRF aleatorio que debe
+// coincidir con el formulario; nunca en Origin/Host reescritos por el proxy.
 func ip(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -111,35 +116,47 @@ func (h *Handler) fail(r *http.Request) {
 	h.failures[k] = v
 	h.global.Count++
 }
+func (h *Handler) loginPage(w http.ResponseWriter, status int, message string) {
+	csrf := random()
+	cookie(w, "__Host-kagmcp-login", csrf, 600)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_ = pageTemplate.Execute(w, view{Login: true, CSRF: csrf, Message: message})
+}
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		csrf := random()
-		cookie(w, "__Host-kagmcp-login", csrf, 600)
-		h.page(w, view{Login: true, CSRF: csrf, Message: "Introduce el PIN de administración"})
+		h.loginPage(w, http.StatusOK, "")
 		return
 	}
-	if r.Method != http.MethodPost || !h.sameOrigin(r) {
-		http.Error(w, "solicitud inválida", 403)
+	if r.Method != http.MethodPost {
+		http.Error(w, "método no permitido; abre /login", http.StatusMethodNotAllowed)
 		return
 	}
 	if !h.allowed(r) {
 		w.Header().Set("Retry-After", "900")
-		http.Error(w, "intentos limitados", 429)
+		h.loginPage(w, http.StatusTooManyRequests, "Demasiados intentos. Vuelve a probar después de 15 minutos.")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 2048)
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := r.ParseForm(); err != nil {
-		http.Error(w, "solicitud inválida", 400)
+		slog.Warn("formulario de login inválido", "reason", "parse_or_size", "origin_present", r.Header.Get("Origin") != "")
+		h.loginPage(w, http.StatusBadRequest, "No se pudo leer el formulario. Abre de nuevo la URL pública de KagMCP y prueba otra vez.")
 		return
 	}
 	c, err := r.Cookie("__Host-kagmcp-login")
 	if err != nil || c.Value == "" || subtle.ConstantTimeCompare([]byte(c.Value), []byte(r.FormValue("csrf"))) != 1 {
-		http.Error(w, "CSRF inválido", 403)
+		slog.Warn("formulario de login rechazado", "reason", "csrf_cookie_or_token", "cookie_present", err == nil, "origin_present", r.Header.Get("Origin") != "")
+		h.loginPage(w, http.StatusForbidden, "No se pudo comprobar la cookie de seguridad. Abre la URL pública directamente en una pestaña nueva y permite sus cookies; vuelve a introducir el PIN.")
 		return
+	}
+	// Un proxy HTTP legítimo puede cambiar Origin o suprimirlo; el CSRF
+	// secreto verificado arriba impide que otra web envíe el formulario.
+	if r.Header.Get("Origin") != h.Public {
+		slog.Info("login recibido a través de proxy con Origin diferente", "origin_present", r.Header.Get("Origin") != "")
 	}
 	if !h.pin.Verify(r.FormValue("pin")) {
 		h.fail(r)
-		http.Error(w, "PIN incorrecto", 401)
+		h.loginPage(w, http.StatusUnauthorized, "PIN incorrecto. Usa el PIN temporal de los logs de Kaggle o el que configuraste desde el panel.")
 		return
 	}
 	token := random()
@@ -187,13 +204,11 @@ func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) (session, bool)
 		return session{}, false
 	}
 	if r.Method == http.MethodPost {
-		if !h.sameOrigin(r) {
-			http.Error(w, "origen inválido", 403)
-			return session{}, false
-		}
+		// Validación mediante cookie de sesión privada + CSRF ligado a ella;
+		// no asumir Origin intacto a través de Gradio/Cloudflare.
 		r.Body = http.MaxBytesReader(w, r.Body, 8192)
 		if err := r.ParseForm(); err != nil || subtle.ConstantTimeCompare([]byte(r.FormValue("csrf")), []byte(s.CSRF)) != 1 {
-			http.Error(w, "CSRF inválido", 403)
+			http.Error(w, "Formulario rechazado: token de seguridad inválido o expirado. Actualiza el panel y vuelve a intentarlo.", 403)
 			return session{}, false
 		}
 	}
@@ -334,7 +349,7 @@ func (h *Handler) page(w http.ResponseWriter, v view) {
 
 var pageTemplate = template.Must(template.New("dashboard").Parse(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>KagMCP · Control</title><style>
 :root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif;background:#0a101b;color:#eaf1ff}body{margin:0;padding:25px;max-width:1150px;margin:auto}h1{font-size:2.1rem;margin:0 0 8px}h2{font-size:1.1rem}p,small{color:#a9b7cd}a{color:#9dc5ff;text-decoration:none}.muted{font-size:.85rem;color:#91a3be}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px;margin-top:20px}.card{background:#111b2c;border:1px solid #2c3b52;border-radius:15px;padding:20px;overflow-wrap:anywhere}.panel{margin-top:20px;background:#101a2b;border:1px solid #293852;border-radius:15px;padding:18px}input,textarea,select,button{box-sizing:border-box;font:inherit;color:#eaf1ff}input,textarea,select{background:#081223;border:1px solid #42536c;border-radius:9px;padding:10px;width:100%;margin:6px 0 12px}textarea{min-height:83px}button{background:#447be8;border:0;border-radius:9px;cursor:pointer;padding:10px 15px}button:hover{background:#6799fb}form{margin:0}header{display:flex;justify-content:space-between;align-items:center;gap:20px}.badge{font-size:.8rem;background:#21374d;border-radius:30px;padding:6px 10px}.entry{border-top:1px solid #26364c;padding:10px 0}.entry:first-of-type{border-top:0}pre{white-space:pre-wrap;word-break:break-word;background:#081223;border-radius:10px;padding:14px;font-size:.78rem;max-height:520px;overflow:auto}.login{max-width:440px;margin:12vh auto}.flex{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.flex form{display:inline-block}.light{border:1px solid #40516d;background:none}code{font-size:.85rem;color:#bcd4ff}hr{border:0;border-top:1px solid #2c3b52}label{font-size:.85rem;color:#b8c8e2}
-</style></head><body>{{if .Login}}<main class="card login"><h1>🔐 KagMCP</h1><p>Acceso administrativo al runtime autorizado</p><form method="post" action="/login"><input type="hidden" name="csrf" value="{{.CSRF}}"><label for="pin">PIN de administración</label><input id="pin" name="pin" type="password" autocomplete="current-password" maxlength="128" required><button type="submit">Iniciar sesión</button></form><p class="muted">Sesiones privadas, caducidad de 8 horas y protección contra intentos repetidos.</p></main>{{else}}<header><div><h1>KagMCP <span class="badge">Ponytail v2 activa</span></h1><p>Proyectos, tareas, memoria e historial compartido</p></div><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="light">Cerrar sesión</button></form></header>
+</style></head><body>{{if .Login}}<main class="card login"><h1>🔐 KagMCP</h1><p>Acceso administrativo al runtime autorizado</p>{{if .Message}}<p role="alert" style="color:#ffbbb5">{{.Message}}</p>{{end}}<form method="post" action="/login"><input type="hidden" name="csrf" value="{{.CSRF}}"><label for="pin">PIN de administración</label><input id="pin" name="pin" type="password" autocomplete="current-password" maxlength="128" required><button type="submit">Iniciar sesión</button></form><p class="muted">Sesiones privadas, caducidad de 8 horas y protección contra intentos repetidos.</p></main>{{else}}<header><div><h1>KagMCP <span class="badge">Ponytail v2 activa</span></h1><p>Proyectos, tareas, memoria e historial compartido</p></div><form method="post" action="/logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="light">Cerrar sesión</button></form></header>
 <section class="cards"><article class="card"><h2>Nuevo proyecto</h2><form action="/project" method="post"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>ID (a-z, 0-9, - y _)</label><input name="id" placeholder="proyecto-demo" required><label>Nombre</label><input name="name" required><label>Repositorio Git</label><input name="repository" placeholder="owner/repo"><label>Cuaderno</label><input name="notebook" placeholder="notebooks/ejemplo.ipynb"><button>Crear proyecto</button></form></article>
 <article class="card"><h2>Cambiar PIN</h2><p>PIN actual obligatorio. Nuevo PIN de 6 a 128 caracteres. Al cambiarlo se revocan las conexiones OAuth y las sesiones web; deberás volver a autenticar los agentes.</p><form action="/change-pin" method="post"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>PIN actual</label><input type="password" name="current_pin" autocomplete="current-password" required maxlength="128"><label>Nuevo PIN</label><input type="password" name="new_pin" autocomplete="new-password" minlength="6" maxlength="128" required><button>Cambiar PIN y cerrar sesiones</button></form></article><article class="card"><h2>GitHub</h2><p>{{if .GitHubOn}}Token activo solo en memoria{{else}}Token no configurado{{end}}. Se comprueba antes de guardarlo; jamás se escribe en disco.</p><form action="/github" method="post"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Personal Access Token</label><input type="password" name="token" autocomplete="off" placeholder="ghp_… / github_pat_…" maxlength="4096"><button>Configurar PAT</button></form><p class="muted">Para desactivar, envía el campo vacío. El token se perderá al reiniciar el proceso.</p></article>
 <article class="card"><h2>Skills</h2><p><strong>Ponytail v2 siempre activa</strong></p>{{range .SkillList}}<div class="entry"><a href="/skills?name={{.Name}}">{{.Name}}</a>{{if .AlwaysActive}} <span class="badge">Siempre activa</span>{{end}}<div class="muted">{{.Description}}</div></div>{{end}}</article></section>

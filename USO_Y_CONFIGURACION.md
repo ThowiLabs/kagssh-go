@@ -235,3 +235,13 @@ En el notebook, `GRADIO_RETRIES=3` se traduce a `MCP_GRADIO_RETRIES=3`. Si neces
 El túnel Gradio utiliza los ejecutables oficiales FRP v0.3 y verifica sus checksums del código del proyecto Gradio, como `frpc_linux_amd64` (SHA-256 `c791d1f047b41ff5885772fc4bf20b797c6059bbd82abb9e31de15e55d6a57c4`). Los ejecutables se guardan en una caché privada de `/kaggle/working/.kagmcp/cache/kagmcp/frp-v0.3/`. El TLS hacia el servidor FRP se verifica con el certificado CA de la API oficial.
 
 **Aclaración:** compartir el servidor Go de KagMCP a través de `gradio.live` **no crea una interfaz de Gradio en Python**. El panel sigue siendo Go, las herramientas siguen siendo MCP y OAuth/PIN siguen protegiendo las rutas administrativas. Las URL temporales pueden caducar o interrumpirse; una caída *posterior* a la conexión no cambia silenciosamente la URL OAuth del cliente ya vinculado. Si el túnel muere después del arranque, reinicia la celda y vuelve a conectar el cliente si cambió el enlace. No compartas el PIN ni los logs que lo incluyen.
+
+### Corrección del login web con túneles Gradio/Cloudflare
+
+El formulario del panel `https://.../` ya **no exige que la cabecera HTTP `Origin` sea exactamente igual a la URL pública**: el proxy de Gradio/Cloudflare puede omitirla o transformarla, provocando el antiguo error genérico «solicitud inválida» **antes de revisar el PIN**.
+
+**No se deshabilitó la protección CSRF:** el servidor exige simultáneamente una cookie `__Host-kagmcp-login` privada `Secure`, `HttpOnly`, `SameSite=Strict` y el token aleatorio correspondiente en el formulario. Tras iniciar sesión, cada formulario administrativo exige la cookie de sesión privada y un token CSRF específico de esa sesión. Ningún formulario sin token válido se acepta, aunque llegue por un túnel legítimo. El control de PIN, rate limits, límites de sesiones y revocación OAuth permanece.
+
+Si el navegador no guarda la cookie, el formulario devuelve una explicación accionable. Si el PIN es erróneo, muestra «PIN incorrecto» sin revelar datos privados. Para probar después de actualizar el servidor Go, abre la **URL raíz anunciada en el log** (`panel_web=https://...gradio.live/` o `panel_web=https://...trycloudflare.com/`) directamente en una pestaña del navegador, introduce el PIN activo y evita abrir el panel dentro de un iframe que bloquee cookies. No es necesario cambiar el PIN ni deshabilitar su seguridad.
+
+Pruebas automatizadas de login a través de proxy: `Origin` vacío, `null`, reescrito y extraño con cookie/token correctos; se rechazan cookies ausentes y tokens falsos con HTTP 403; formularios protegidos después del login requieren su CSRF; se informa de errores de parseo sin mostrar credenciales.

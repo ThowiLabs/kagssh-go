@@ -179,3 +179,111 @@ func TestChangePINRequiresCurrentAndRevokesAllSessions(t *testing.T) {
 		t.Fatalf("nuevo PIN no permite entrar: %d", loginNew.Code)
 	}
 }
+
+func TestGradioLoginWithProxyModifiedOrMissingOrigin(t *testing.T) {
+	for _, origin := range []string{"", "null", "https://gradio.live", "https://proxy.gradio.live", "https://evil.example"} {
+		t.Run("origin_"+origin, func(t *testing.T) {
+			h := testHandler(t)
+			page := call(h, "GET", "/login", nil)
+			if page.Code != 200 {
+				t.Fatalf("GET login: %d", page.Code)
+			}
+			c := page.Result().Cookies()[0]
+			values := url.Values{"pin": {"TEST_LONG_ACCESS_PIN"}, "csrf": {c.Value}}
+			req := httptest.NewRequest("POST", "/login", strings.NewReader(values.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if origin != "" {
+				req.Header.Set("Origin", origin)
+			}
+			req.AddCookie(c)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != 303 {
+				t.Fatalf("login con Origin=%q: %d body=%s", origin, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+func TestProxyCannotBypassCSRF(t *testing.T) {
+	for _, tc := range []struct {
+		name, origin string
+		cookie, csrf bool
+	}{
+		{"missing_origin_and_missing_cookie", "", false, true},
+		{"foreign_origin_and_missing_cookie", "https://evil.example", false, true},
+		{"foreign_origin_wrong_csrf", "https://evil.example", true, false},
+		{"missing_origin_wrong_csrf", "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := testHandler(t)
+			get := call(h, "GET", "/login", nil)
+			c := get.Result().Cookies()[0]
+			csrf := "invalid"
+			if tc.csrf {
+				csrf = c.Value
+			}
+			payload := url.Values{"pin": {"TEST_LONG_ACCESS_PIN"}, "csrf": {csrf}}
+			req := httptest.NewRequest("POST", "/login", strings.NewReader(payload.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.cookie {
+				req.AddCookie(c)
+			}
+			out := httptest.NewRecorder()
+			h.ServeHTTP(out, req)
+			if out.Code != 403 {
+				t.Fatalf("CSRF omitido aceptado, status=%d", out.Code)
+			}
+			if !strings.Contains(out.Body.String(), "cookie de seguridad") {
+				t.Fatal("error no explica la causa")
+			}
+		})
+	}
+}
+func TestGradioAuthenticatedActionWithMissingOrigin(t *testing.T) {
+	h := testHandler(t)
+	get := call(h, "GET", "/login", nil)
+	cookie := get.Result().Cookies()[0]
+	auth := call(h, "POST", "/login", url.Values{"csrf": {cookie.Value}, "pin": {"TEST_LONG_ACCESS_PIN"}}, cookie)
+	var sessionCookie *http.Cookie
+	for _, c := range auth.Result().Cookies() {
+		if c.Name == "__Host-kagmcp-session" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("no hay sesión")
+	}
+	csrf := h.sessions[key(sessionCookie.Value)].CSRF
+	values := url.Values{"csrf": {csrf}, "id": {"gradio"}, "name": {"Prueba Gradio"}}
+	req := httptest.NewRequest("POST", "/project", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(sessionCookie)
+	out := httptest.NewRecorder()
+	h.ServeHTTP(out, req)
+	if out.Code != 303 {
+		t.Fatalf("acción autenticada sin Origin HTTP%d: %s", out.Code, out.Body.String())
+	}
+	// La misma sesión no puede usar un token CSRF inventado.
+	values.Set("csrf", "incorrecto")
+	req2 := httptest.NewRequest("POST", "/project", strings.NewReader(values.Encode()))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req2.AddCookie(sessionCookie)
+	denied := httptest.NewRecorder()
+	h.ServeHTTP(denied, req2)
+	if denied.Code != 403 {
+		t.Fatalf("acción sin CSRF aceptada: %d", denied.Code)
+	}
+}
+func TestLoginInvalidFormGivesHelpfulExplanation(t *testing.T) {
+	h := testHandler(t)
+	req := httptest.NewRequest("POST", "/login", strings.NewReader(strings.Repeat("x", 5000)))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	out := httptest.NewRecorder()
+	h.ServeHTTP(out, req)
+	if out.Code != 400 || !strings.Contains(out.Body.String(), "No se pudo leer el formulario") {
+		t.Fatalf("no explicó error formulario: %d %s", out.Code, out.Body.String()[:min(out.Body.Len(), 350)])
+	}
+}
