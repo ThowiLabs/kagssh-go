@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func issueAccessTokenForTest(t *testing.T, srv *Server) string {
+func issueAccessTokenForTest(t *testing.T, srv *Server, pinOverride ...string) string {
 	t.Helper()
 	handler := srv.Handler()
 	regBody := `{"client_name":"test-discovery","redirect_uris":["https://client.example/callback"],"grant_types":["authorization_code","refresh_token"],"response_types":["code"],"token_endpoint_auth_method":"none"}`
@@ -52,7 +52,11 @@ func issueAccessTokenForTest(t *testing.T, srv *Server) string {
 		t.Fatal("sesion OAuth malformada")
 	}
 	session := part[:end]
-	form := url.Values{"authorization_session": {session}, "csrf": {cookies[0].Value}, "pin": {srv.cfg.MCPAccessPIN}, "decision": {"approve"}}
+	pin := "LONG-TEST-PIN-ABC"
+	if len(pinOverride) > 0 {
+		pin = pinOverride[0]
+	}
+	form := url.Values{"authorization_session": {session}, "csrf": {cookies[0].Value}, "pin": {pin}, "decision": {"approve"}}
 	consentReq := httptest.NewRequest(http.MethodPost, "/oauth/authorize", strings.NewReader(form.Encode()))
 	consentReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	consentReq.AddCookie(cookies[0])

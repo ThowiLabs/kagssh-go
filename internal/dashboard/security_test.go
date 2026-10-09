@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"github.com/ThowiLabs/kagssh-go/internal/pinauth"
 	"github.com/ThowiLabs/kagssh-go/internal/projectstate"
 	"github.com/ThowiLabs/kagssh-go/internal/skills"
 	"net/http"
@@ -18,7 +19,11 @@ func testHandler(t *testing.T) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(baseURL, "TEST_LONG_ACCESS_PIN", store, skills.Registry{Dir: t.TempDir()}, nil, func() bool { return false }, nil, nil)
+	pin, err := pinauth.New("TEST_LONG_ACCESS_PIN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(baseURL, pin, nil, store, skills.Registry{Dir: t.TempDir()}, nil, func() bool { return false }, nil, nil)
 }
 func call(h http.Handler, method, path string, values url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	body := ""
@@ -126,5 +131,51 @@ func TestImportRequiresSessionAndCSRF(t *testing.T) {
 	valid := call(h, "POST", "/import", url.Values{"project": {"alpha"}, "csrf": {csrf}}, session)
 	if valid.Code != 303 || !called {
 		t.Fatalf("importación autenticada: %d, called=%v", valid.Code, called)
+	}
+}
+
+func TestChangePINRequiresCurrentAndRevokesAllSessions(t *testing.T) {
+	h := testHandler(t)
+	revoked := 0
+	h.revokePIN = func() error { revoked++; return nil }
+	page := call(h, "GET", "/login", nil)
+	csrfCookie := page.Result().Cookies()[0]
+	signedIn := call(h, "POST", "/login", url.Values{"pin": {"TEST_LONG_ACCESS_PIN"}, "csrf": {csrfCookie.Value}}, csrfCookie)
+	if signedIn.Code != 303 {
+		t.Fatalf("login HTTP %d", signedIn.Code)
+	}
+	var sessionCookie *http.Cookie
+	for _, c := range signedIn.Result().Cookies() {
+		if c.Name == "__Host-kagmcp-session" {
+			sessionCookie = c
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("no hay sesión")
+	}
+	csrf := h.sessions[key(sessionCookie.Value)].CSRF
+	denied := call(h, "POST", "/change-pin", url.Values{"csrf": {csrf}, "current_pin": {"equivocado"}, "new_pin": {"654321"}}, sessionCookie)
+	if denied.Code != 400 || revoked != 0 {
+		t.Fatalf("PIN actual incorrecto pudo rotar: %d", denied.Code)
+	}
+	tooShort := call(h, "POST", "/change-pin", url.Values{"csrf": {csrf}, "current_pin": {"TEST_LONG_ACCESS_PIN"}, "new_pin": {"12345"}}, sessionCookie)
+	if tooShort.Code != 400 || revoked != 0 {
+		t.Fatalf("aceptó PIN menor de seis: %d", tooShort.Code)
+	}
+	changed := call(h, "POST", "/change-pin", url.Values{"csrf": {csrf}, "current_pin": {"TEST_LONG_ACCESS_PIN"}, "new_pin": {"654321"}}, sessionCookie)
+	if changed.Code != 303 || revoked != 1 {
+		t.Fatalf("rotación fallida: %d revocations %d", changed.Code, revoked)
+	}
+	if h.pin.Verify("TEST_LONG_ACCESS_PIN") || !h.pin.Verify("654321") {
+		t.Fatal("nuevo PIN no aplicado o anterior aún válido")
+	}
+	if home := call(h, "GET", "/", nil, sessionCookie); home.Code != 303 {
+		t.Fatal("sesión web existente no revocada")
+	}
+	newPage := call(h, "GET", "/login", nil)
+	newCSRF := newPage.Result().Cookies()[0]
+	loginNew := call(h, "POST", "/login", url.Values{"pin": {"654321"}, "csrf": {newCSRF.Value}}, newCSRF)
+	if loginNew.Code != 303 {
+		t.Fatalf("nuevo PIN no permite entrar: %d", loginNew.Code)
 	}
 }

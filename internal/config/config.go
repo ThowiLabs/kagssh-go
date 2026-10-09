@@ -163,8 +163,8 @@ func (c Config) Validate() error {
 		return errors.New("habilita MCP_ENABLED o SSH_ENABLED")
 	}
 	if c.MCPEnabled {
-		if len(c.MCPAccessPIN) < 12 || len(c.MCPAccessPIN) > 128 || strings.ContainsAny(c.MCPAccessPIN, "\r\n\x00") {
-			return errors.New("MCP_ACCESS_PIN debe tener entre 12 y 128 caracteres y configurarse en Kaggle Secrets")
+		if c.MCPAccessPIN != "" && (len(c.MCPAccessPIN) < 6 || len(c.MCPAccessPIN) > 128 || strings.ContainsAny(c.MCPAccessPIN, "\r\n\x00")) {
+			return errors.New("MCP_ACCESS_PIN debe estar vacío (Go genera PIN) o tener entre 6 y 128 caracteres")
 		}
 		switch c.MCPTunnel {
 		case "cloudflare", "none":

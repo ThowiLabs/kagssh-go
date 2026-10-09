@@ -23,6 +23,7 @@ import (
 	"github.com/ThowiLabs/kagssh-go/internal/diskguard"
 	"github.com/ThowiLabs/kagssh-go/internal/githubtoken"
 	"github.com/ThowiLabs/kagssh-go/internal/oauth"
+	"github.com/ThowiLabs/kagssh-go/internal/pinauth"
 	"github.com/ThowiLabs/kagssh-go/internal/projectstate"
 	"github.com/ThowiLabs/kagssh-go/internal/quicktunnel"
 	"github.com/ThowiLabs/kagssh-go/internal/securefs"
@@ -51,23 +52,40 @@ type response struct {
 	Error   *rpcError       `json:"error,omitempty"`
 }
 type Server struct {
-	cfg      config.Config
-	public   string
-	auth     *oauth.Server
-	githubMu sync.RWMutex
-	github   *githubtoken.Client
-	githubOn bool
-	projects *projectstate.Store
-	skills   skills.Registry
+	cfg          config.Config
+	public       string
+	auth         *oauth.Server
+	pinState     *pinauth.State
+	generatedPIN string
+	githubMu     sync.RWMutex
+	github       *githubtoken.Client
+	githubOn     bool
+	projects     *projectstate.Store
+	skills       skills.Registry
 }
 
 func New(cfg config.Config, public string) (*Server, error) {
+	pin := cfg.MCPAccessPIN
+	generated := ""
+	if pin == "" {
+		var err error
+		pin, err = pinauth.Generate()
+		if err != nil {
+			return nil, fmt.Errorf("generar PIN criptográfico: %w", err)
+		}
+		generated = pin
+	}
+	pinState, err := pinauth.New(pin)
+	if err != nil {
+		return nil, err
+	}
+	cfg.MCPAccessPIN = "" // La configuración retenida no necesita el PIN en claro.
 	if err := securefs.EnsurePrivateDir(cfg.DataDir); err != nil {
 		return nil, fmt.Errorf("proteger directorio KagMCP: %w", err)
 	}
 	state := filepath.Join(cfg.DataDir, "state", "oauth.json")
 	auth, err := oauth.New(oauth.Config{
-		PublicURL: public, StateFile: state, AccessPIN: cfg.MCPAccessPIN, AgentMode: true,
+		PublicURL: public, StateFile: state, PINState: pinState, AgentMode: true,
 		AccessTTL: time.Hour, RefreshTTL: 30 * 24 * time.Hour,
 		PINMaxAttempts: 5, PINWindow: 5 * time.Minute, PINLockout: 15 * time.Minute,
 	})
@@ -78,13 +96,13 @@ func New(cfg config.Config, public string) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cargar proyectos: %w", err)
 	}
-	return &Server{cfg: cfg, public: public, auth: auth, github: githubtoken.New(cfg.GitHubToken), githubOn: cfg.GitHubToken != "", projects: projects, skills: skills.Registry{Dir: filepath.Join(cfg.DataDir, "skills")}}, nil
+	return &Server{cfg: cfg, public: public, auth: auth, pinState: pinState, generatedPIN: generated, github: githubtoken.New(cfg.GitHubToken), githubOn: cfg.GitHubToken != "", projects: projects, skills: skills.Registry{Dir: filepath.Join(cfg.DataDir, "skills")}}, nil
 }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.auth.RegisterRoutes(mux)
 	mux.Handle("/mcp", s)
-	mux.Handle("/", dashboard.New(s.public, s.cfg.MCPAccessPIN, s.projects, s.skills, s.configureGitHub, s.githubConfigured, s.projectExport, s.projectImport))
+	mux.Handle("/", dashboard.New(s.public, s.pinState, s.auth.ResetOwner, s.projects, s.skills, s.configureGitHub, s.githubConfigured, s.projectExport, s.projectImport))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "KagMCP OK\n")
@@ -114,6 +132,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	server, err := New(cfg, public)
 	if err != nil {
 		return err
+	}
+	if server.generatedPIN != "" {
+		log.Warn("PIN temporal generado por Go; úsalo para el panel y OAuth, cambia el PIN desde el panel si deseas", "pin_temporal", server.generatedPIN)
+		server.generatedPIN = "" // Mostrarlo una sola vez y no retener una segunda copia en Server.
 	}
 	httpServer := &http.Server{Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 60 * time.Second, WriteTimeout: 65 * time.Second, IdleTimeout: 75 * time.Second,

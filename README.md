@@ -12,9 +12,9 @@ No está afiliado, respaldado ni patrocinado por Kaggle, Google u OpenAI. El usu
 
 1. En Kaggle habilita **Internet**. **No necesitas GPU ni configurar Kaggle Secrets** para MCP puro.
 2. Ejecuta `clonar`, `instalar-go` y `compilar`, en ese orden.
-3. Ejecuta la celda **configurar**. Por defecto trae `MCP_ENABLED=True` y `SSH_ENABLED=False`; solicita mediante `getpass` un **PIN OAuth secreto de 12–128 caracteres**. Para GitHub, cambia `USE_GITHUB=True` y escribe el PAT de forma oculta en el mismo paso.
+3. Ejecuta la celda **configurar**. Por defecto trae `MCP_ENABLED=True`, `SSH_ENABLED=False` y `pin = ""`. Si dejas el PIN vacío, **Go genera uno temporal de 20 caracteres con aleatoriedad criptográfica** y lo muestra una sola vez en los logs de `run`. Opcionalmente puedes definir un PIN de **6 a 128 caracteres** en el notebook privado. Para GitHub, cambia `USE_GITHUB=True` y escribe el PAT de forma oculta con `getpass`.
 4. Ejecuta **validación** y después **run**. El proceso Go recibe las opciones como variables del proceso; **no consulta Kaggle Secrets** para MCP ni GitHub. La celda run permanece activa con logs en vivo.
-5. Copia la URL `https://....trycloudflare.com/mcp` y conecta ChatGPT; aprueba OAuth con el PIN que introdujiste en Python.
+5. Copia la URL `https://....trycloudflare.com/mcp` y conecta ChatGPT con el PIN definido o generado por Go. Abre la URL raíz `https://....trycloudflare.com/` para iniciar sesión con ese mismo PIN y **cambiarlo desde el panel**; al cambiarlo se revocan tokens OAuth previos y sesiones web.
 6. Para terminar, pulsa **Detener/Interruptar** en la celda run.
 
 **SSH/SFTP opcional:** activa `SSH_ENABLED=True` en la celda de configuración e indica allí el host, usuario, puertos y huella del VPS. Solo entonces Python lee desde Kaggle Secrets `SSH_PASSWORD` (contraseña del VPS) y `SSH_LOGIN_PASSWORD` (contraseña de entrada al servidor SSH local). Si SSH está deshabilitado, el notebook no invoca la API de Secrets.
@@ -57,7 +57,7 @@ En el notebook recomendado se prepara una copia llamada `RUNTIME_ENV` para cada 
 | `SSH_PORT_KAGGLE`, `SSH_PORT_LOCAL` | `2223`, `2224` | Puertos SSH |
 | `SSH_FINGERPRINT` | vacío | Huella del VPS verificada por canal seguro |
 
-**Nunca escribas `MCP_ACCESS_PIN`, `GITHUB_TOKEN`, `SSH_PASSWORD` o `SSH_LOGIN_PASSWORD` como texto visible en el notebook.** El PIN y el PAT se piden con `getpass`; solo las dos contraseñas SSH opcionales provienen de Kaggle Secrets. Todos se almacenan **en la memoria de Python y del proceso Go durante la sesión**. `.kagmcp/config.json` conserva solo configuraciones públicas. No se promete aislamiento absoluto frente a otros procesos con privilegios elevados en el mismo runtime.
+**Configuración de PIN:** `pin = ""` significa que Go genera un PIN temporal y lo muestra solo al arrancar `run`; no lo crea Python ni se consulta Kaggle Secrets. Se admite definir `pin = "MI_PIN"` (de 6 a 128 caracteres) en el notebook privado, pero el texto y el historial de versiones del cuaderno podrían exponerlo a quienes tengan acceso. El PAT sigue solicitándose con `getpass`; las contraseñas SSH opcionales provienen de Kaggle Secrets. Las credenciales no se guardan en `.kagmcp/config.json`. Protege la salida de Kaggle que contiene el PIN temporal.
 
 La ejecución directa del binario Go sin la celda Python conserva el mecanismo anterior de lectura automática por entorno/Kaggle Secrets. Para evitar HTTP 429 en el notebook, usa siempre el entorno ya preparado.
 

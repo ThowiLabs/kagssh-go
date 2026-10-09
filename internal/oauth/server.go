@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ThowiLabs/kagssh-go/internal/pinauth"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -57,6 +58,7 @@ type Config struct {
 	RequireClientCertificate bool
 	ClientCertificateDNSName string
 	AccessPIN                string
+	PINState                 *pinauth.State
 	PINMaxAttempts           int
 	PINWindow                time.Duration
 	PINLockout               time.Duration
@@ -75,8 +77,7 @@ type Server struct {
 	sessionTTL               time.Duration
 	requireClientCertificate bool
 	clientCertificateDNSName string
-	pinEnabled               bool
-	pinHash                  [sha256.Size]byte
+	pinState                 *pinauth.State
 	pinLimiter               *pinLimiter
 	clientMetadataHTTPClient *http.Client
 	multiTenant              bool
@@ -123,10 +124,12 @@ func New(cfg Config) (*Server, error) {
 			slog.Warn("reset OAuth owner because the public resource changed")
 		}
 	}
-	pinEnabled := cfg.AccessPIN != ""
-	var pinHash [sha256.Size]byte
-	if pinEnabled {
-		pinHash = sha256.Sum256([]byte(cfg.AccessPIN))
+	pinState := cfg.PINState
+	if pinState == nil && cfg.AccessPIN != "" {
+		pinState, err = pinauth.New(cfg.AccessPIN)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Server{
 		publicURL:                base,
@@ -138,8 +141,7 @@ func New(cfg Config) (*Server, error) {
 		sessionTTL:               cfg.SessionTTL,
 		requireClientCertificate: cfg.RequireClientCertificate,
 		clientCertificateDNSName: strings.TrimSpace(cfg.ClientCertificateDNSName),
-		pinEnabled:               pinEnabled,
-		pinHash:                  pinHash,
+		pinState:                 pinState,
 		pinLimiter:               newPINLimiter(cfg.PINMaxAttempts, cfg.PINWindow, cfg.PINLockout),
 		clientMetadataHTTPClient: newClientMetadataHTTPClient(),
 		multiTenant:              cfg.MultiTenant,
@@ -173,7 +175,7 @@ func (s *Server) IsLinked() bool {
 }
 
 func (s *Server) requiresPIN() bool {
-	return s.requireSandbox || s.pinEnabled || s.HasEnvironments()
+	return s.requireSandbox || s.pinState != nil || s.HasEnvironments()
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
@@ -554,8 +556,7 @@ func (s *Server) handleAuthorizePOST(w http.ResponseWriter, r *http.Request) {
 			session.EnvironmentRev = env.Revision
 			session.EnvironmentUntil = env.ExpiresAt
 		} else {
-			provided := sha256.Sum256([]byte(providedPIN))
-			if subtle.ConstantTimeCompare(provided[:], s.pinHash[:]) != 1 {
+			if s.pinState == nil || !s.pinState.Verify(providedPIN) {
 				if blocked, retry := s.pinLimiter.failure(ip, time.Now()); blocked {
 					slog.Debug("oauth PIN lockout started", "request_id", requestID(r), "session", fingerprint(sessionID), "client_ip", ip, "retry_after", retry.Round(time.Second).String())
 					s.writeRateLimited(w, retry)

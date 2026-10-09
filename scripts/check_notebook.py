@@ -146,12 +146,20 @@ def simulate_setup(source, *, secret_module=None):
 normal_env, normal_output, calls = simulate_setup(config_source)
 if calls or normal_env.get("SSH_ENABLED") != "false" or normal_env.get("MCP_ENABLED") != "true":
     raise SystemExit("El perfil MCP-only no debe consultar Secrets ni habilitar SSH.")
-if (normal_env.get("MCP_ACCESS_PIN") != test_pin
+if (normal_env.get("MCP_ACCESS_PIN") != ""
     or "KAGGLE_USER_SECRETS_TOKEN" in normal_env or "KAGGLE_IAP_TOKEN" in normal_env
     or "GITHUB_TOKEN" in normal_env or "SSH_HOST" in normal_env):
     raise SystemExit("El entorno de Go contiene valores antiguos o tokens internos Kaggle.")
 if any(value in normal_output for value in (test_pin, test_pat, test_vps_password, test_local_password)):
     raise SystemExit("La celda configurar mostró secretos en stdout.")
+
+# Un PIN explícito de seis caracteres se pasa sin generación en Python.
+custom_source = config_source.replace('pin = ""', 'pin = "ABCDEF"')
+custom_env, custom_output, custom_reads = simulate_setup(custom_source)
+if custom_env.get("MCP_ACCESS_PIN") != "ABCDEF" or custom_reads:
+    raise SystemExit("El PIN opcional de 6 caracteres no se pasó a Go.")
+if "ABCDEF" in custom_output:
+    raise SystemExit("No debe imprimirse el PIN definido en Python.")
 
 # Activar VPS debe consultar exactamente las dos contraseñas solicitadas.
 ssh_source = config_source.replace("SSH_ENABLED = False", "SSH_ENABLED = True")

@@ -15,7 +15,7 @@ Abre [notebooks/kagssh_kaggle_chatgpt_agentes.ipynb](notebooks/kagssh_kaggle_cha
 1. **clonar:** descarga `main` sin sobreescribir cambios locales.
 2. **instalar-go:** comprueba Go requerido o descarga la versión oficial validada con SHA256.
 3. **compilar:** genera `/kaggle/working/kagmcp-linux-amd64`.
-4. **configurar:** define opciones no sensibles y pide con `getpass` el PIN OAuth y el PAT opcional; con SSH activado consulta únicamente dos contraseñas SSH de Kaggle Secrets.
+4. **configurar:** define opciones no sensibles y `pin = ""` (Go genera un PIN temporal al arrancar `run`) o establece un PIN propio de 6–128 caracteres. El PAT opcional se pide con `getpass`; con SSH activado se consultan únicamente dos contraseñas de Kaggle Secrets.
 5. **validación:** ejecuta `-check` con el entorno preparado **sin consultar Secrets**.
 6. **run:** inicia Go en primer plano, muestra sus logs y termina al pulsar **Detener/Interruptar**.
 
@@ -35,7 +35,7 @@ MCP_LISTEN_PORT = 8181
 USE_GITHUB = False
 ```
 
-El notebook solicita el PIN con `getpass.getpass`, sin guardarlo en el código. Inicia HTTP en `127.0.0.1:8181`, crea el túnel Cloudflare verificado y muestra la URL `https://...trycloudflare.com/mcp`.
+Con `pin = ""`, Go genera al iniciar un PIN temporal criptográficamente aleatorio (20 caracteres) y lo imprime una sola vez en la salida privada de la celda `run`; **Python no genera ni solicita el PIN**. Si configuras un valor propio, debe tener entre **6 y 128 caracteres**. Inicia HTTP en `127.0.0.1:8181`, crea el túnel HTTPS y muestra `/mcp` y el panel `/`. Tras iniciar sesión con el PIN actual, puedes modificarlo en la web. El cambio revoca las sesiones web y autorizaciones OAuth previas, por lo que los clientes deberán autorizarse de nuevo.
 
 **La GPU no es necesaria para MCP.** Con SSH deshabilitado **no se hace ninguna llamada a Kaggle Secrets**, aunque en la cuenta existan Secrets antiguos. La celda retira de `RUNTIME_ENV` las credenciales internas `KAGGLE_USER_SECRETS_TOKEN` y `KAGGLE_IAP_TOKEN` antes de llamar a Go. El entorno global de Kaggle no se altera.
 
@@ -74,7 +74,7 @@ El ejecutable Go sigue soportando, cuando se utiliza fuera de este notebook, sus
   kagssh-go/                  # clon temporal del repositorio actual
 ```
 
-El programa emplea `/kaggle/working/.kagmcp` para estado privado y caché. Utiliza permisos privados de directorio y archivo. El archivo `config.json` se escribe automáticamente cuando arranca el CLI y solo conserva flags, puerto y URL propia. La celda Python aporta el PIN y PAT temporalmente con entrada oculta, mientras que Kaggle Secrets se consulta solo para las dos contraseñas SSH cuando corresponde. Ninguna credencial se serializa a JSON local.
+El programa emplea `/kaggle/working/.kagmcp` para estado privado y caché. Utiliza permisos privados de directorio y archivo. El archivo `config.json` se escribe automáticamente cuando arranca el CLI y solo conserva flags, puerto y URL propia. La celda Python entrega un PIN explícito o vacío; **Go genera el temporal cuando el valor llega vacío**. El PAT continúa usándose mediante `getpass`, y Kaggle Secrets se consulta solo para las dos contraseñas SSH cuando corresponde. Ninguna credencial se serializa a JSON local.
 
 **Persistencia:** Kaggle puede perder archivos de `/kaggle/working` al cambiar de runtime, por lo que no se garantiza persistencia entre ejecuciones. Cuando se pierde el estado OAuth o cambia la URL pública, se vuelve a conectar el cliente.
 
@@ -133,7 +133,7 @@ La prueba real debe cubrir: inicio Cloudflare, URL HTTPS, descubrimiento OAuth, 
 
 - KagMCP **no** conserva un runtime Kaggle vivo indefinidamente; debes cumplir sus límites de sesión.
 - Las herramientas autorizadas pueden ejecutar código dentro de Kaggle con los permisos reales del proceso, que en algunos runtimes pueden ser root.
-- `MCP_ACCESS_PIN`, `GITHUB_TOKEN`, `SSH_PASSWORD` y claves privadas nunca deben registrarse en notebooks públicos ni logs.
+- No compartas notebooks que tengan un PIN explícito ni los logs privados donde Go muestra **una sola vez** el PIN temporal generado; no publiques `GITHUB_TOKEN`, `SSH_PASSWORD` ni claves privadas.
 - El cliente SSH con huella no configurada usa TOFU (confianza en primer uso); verifica esa primera huella fuera de banda.
 - No expongas el puerto de origen HTTP directamente a Internet; utiliza HTTPS y OAuth.
 
