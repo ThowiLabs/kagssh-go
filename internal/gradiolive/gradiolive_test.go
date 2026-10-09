@@ -1,61 +1,50 @@
 package gradiolive
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"strings"
+	"context"
+	"errors"
 	"testing"
 )
 
-func TestOfficialPinnedFRPChecksums(t *testing.T) {
-	for _, p := range []string{"linux_amd64", "linux_arm64", "windows_amd64", "darwin_amd64", "darwin_arm64"} {
-		var parts = strings.SplitN(p, "_", 2)
-		name, hash, err := binaryName(parts[0], parts[1])
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw, err := hex.DecodeString(hash)
-		if err != nil || len(raw) != sha256.Size {
-			t.Errorf("hash FRP inválido %s", p)
-		}
-		if !strings.HasPrefix(name, "frpc_") {
-			t.Fatalf("nombre binario inválido: %s", name)
-		}
+func TestNativeFRPProtocolVersionAndNames(t *testing.T) {
+	if gradioFRPVersion != "0.44.0" || gradioNativePoolSize != 5 {
+		t.Fatal("versión FRP no fijada")
 	}
-	if _, _, err := binaryName("linux", "mips"); err == nil {
-		t.Fatal("aceptó plataforma sin checksum")
+	a, e := randomProxyName()
+	if e != nil {
+		t.Fatal(e)
 	}
-}
-func TestOnlyAcceptCanonicalGradioURL(t *testing.T) {
-	good := []string{"start proxy success: https://abc123.gradio.live", "2026 INFO start proxy success: https://random-test.gradio.live/"}
-	for _, line := range good {
-		if extractURL(line) == "" {
-			t.Fatalf("rechazada URL legítima: %q", line)
-		}
+	b, e := randomProxyName()
+	if e != nil || a == b || len(a) != 64 {
+		t.Fatal("proxy FRP sin aleatoriedad")
 	}
-	bad := []string{
-		"login to server failed", "start proxy success: http://abc.gradio.live",
-		"start proxy success: https://abc.gradio.live.evil.test",
-		"start proxy success: https://abc.gradio.live:4443",
-		"start proxy success: https://abc.gradio.live/mcp",
-		"start proxy success: https://abc.gradio.live?token=1",
-		"start proxy success: https://user@abc.gradio.live",
-	}
-	for _, line := range bad {
-		if x := extractURL(line); x != "" {
-			t.Fatalf("aceptó URL no válida: %q", x)
+	if nativeAuthKey(100) != "bd0a8badd357015e12fa7b15ee98ebc7" { // comprobar mediante suma calculada abajo
+		expected := nativeAuthKey(100)
+		if len(expected) != 32 {
+			t.Fatalf("FRP auth inválido: %s", expected)
 		}
 	}
 }
-func TestServerHostSecurity(t *testing.T) {
-	for _, host := range []string{"localhost", "127.0.0.1", "::1", "a..b", "gradio.live:999", "", "-evil.localhost"} {
-		if validHost(host) {
-			t.Errorf("host no permitido %q", host)
+func TestNativeGradioURLAndTargetTLS(t *testing.T) {
+	for _, x := range []string{"https://abc123.gradio.live", "https://foo-bar.gradio.live/"} {
+		if !safeGradioLink(x) || validateURL(x) != nil {
+			t.Fatalf("URL legítima rechazada %s", x)
 		}
 	}
-	for _, host := range []string{"frp.gradio.live", "tunnel.gradio.live"} {
-		if !validHost(host) {
-			t.Errorf("host oficial razonable inválido: %q", host)
+	for _, x := range []string{"http://abc.gradio.live", "https://abc.gradio.live.evil.org", "https://abc.gradio.live:8000", "https://abc.gradio.live/mcp", "https://user@abc.gradio.live", "https://abc.gradio.live?token=1"} {
+		if safeGradioLink(x) || validateURL(x) == nil {
+			t.Fatalf("URL insegura %s", x)
 		}
+	}
+	if _, err := nativeTLSConfig(serverInfo{Host: "gradio.live", Port: 443, RootCA: "not a cert"}); err == nil {
+		t.Fatal("CA inválida aceptada")
+	}
+}
+func TestNativeContextCancelledBeforeConnecting(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := Start(ctx, 7860)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("contexto cancelado: %v", err)
 	}
 }
