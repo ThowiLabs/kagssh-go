@@ -12,12 +12,13 @@ import (
 )
 
 type Project struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Repository string   `json:"repository"`
-	Notebook   string   `json:"notebook"`
-	Memory     []string `json:"memory"`
-	Tasks      []Task   `json:"tasks"`
+	ID           string        `json:"id"`
+	Name         string        `json:"name"`
+	Repository   string        `json:"repository"`
+	Notebook     string        `json:"notebook"`
+	Memory       []string      `json:"memory"`
+	Tasks        []Task        `json:"tasks"`
+	Verification *Verification `json:"verification,omitempty"`
 }
 type Task struct {
 	ID     string `json:"id"`
@@ -223,6 +224,8 @@ func (s *Store) Get(id string) (Project, error) {
 	return Project{}, errors.New("proyecto no encontrado")
 }
 func (s *Store) Restore(p Project) error {
+	// Un comprobante importado de Git no demuestra que esta sesión Kaggle haya ejecutado las pruebas.
+	p.Verification = nil
 	if p.ID == "" || p.Name == "" || len(p.ID) > 64 || len(p.Name) > 160 || len(p.Memory) > 200 || len(p.Tasks) > 200 {
 		return errors.New("estado de proyecto inválido")
 	}

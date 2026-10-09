@@ -106,15 +106,24 @@ func (s *Server) projectExport(id string) (any, error) {
 	return map[string]any{"markdown": path, "state": statePath, "warning": "Archivos sensibles del proyecto: revisa su contenido antes de hacer commit/push. Para recuperar en otro runtime, usa project_import"}, nil
 }
 func (s *Server) scaffoldGradio(id string, testsPassed bool) (any, error) {
-	if !testsPassed {
-		return nil, errors.New("verifica tests y notebook antes de crear Gradio")
-	}
+	_ = testsPassed // Compatibilidad con clientes antiguos: no constituye una prueba.
+	// La generación exige comprobante de ejecución real y artefactos sin cambios.
 	p, err := s.projects.Get(id)
 	if err != nil {
 		return nil, err
 	}
 	if p.Repository == "" || p.Notebook == "" {
 		return nil, errors.New("registra repositorio y notebook primero")
+	}
+	if p.Verification == nil || !p.Verification.Valid() {
+		return nil, errors.New("primero ejecuta project_verify con pruebas y notebook reales")
+	}
+	actualHead, actualNotebook, verifyErr := s.projectArtifacts(context.Background(), id)
+	if verifyErr != nil {
+		return nil, verifyErr
+	}
+	if actualHead != p.Verification.GitHead || actualNotebook != p.Verification.NotebookSHA256 {
+		return nil, errors.New("repositorio o notebook cambió después de verificar; repite project_verify")
 	}
 	dir, err := s.path(filepath.Join("/kaggle/working", id), true)
 	if err != nil {
@@ -175,24 +184,26 @@ func (s *Server) scaffoldGradio(id string, testsPassed bool) (any, error) {
 }
 func managementTool(name string) bool {
 	switch name {
-	case "skills_list", "skills_read", "skills_search", "skills_install", "projects_list", "project_create", "project_memory_add", "project_export", "project_import", "tasks_add", "tasks_update", "history_list", "gradio_scaffold":
+	case "skills_list", "skills_read", "skills_search", "skills_install", "projects_list", "project_create", "project_memory_add", "project_export", "project_import", "tasks_add", "tasks_update", "history_list", "project_verify", "gradio_scaffold":
 		return true
 	}
 	return false
 }
 func (s *Server) invokeManagement(ctx context.Context, name string, raw json.RawMessage) (any, error) {
 	var a struct {
-		Name        string `json:"name"`
-		Query       string `json:"query"`
-		Project     string `json:"project"`
-		Title       string `json:"title"`
-		Repository  string `json:"repository"`
-		Notebook    string `json:"notebook"`
-		Content     string `json:"content"`
-		Task        string `json:"task"`
-		Status      string `json:"status"`
-		Offset      int    `json:"offset"`
-		TestsPassed bool   `json:"tests_passed"`
+		Name            string `json:"name"`
+		Query           string `json:"query"`
+		Project         string `json:"project"`
+		Title           string `json:"title"`
+		Repository      string `json:"repository"`
+		Notebook        string `json:"notebook"`
+		Content         string `json:"content"`
+		Task            string `json:"task"`
+		Status          string `json:"status"`
+		Offset          int    `json:"offset"`
+		TestsPassed     bool   `json:"tests_passed"`
+		TestCommand     string `json:"test_command"`
+		NotebookCommand string `json:"notebook_command"`
 	}
 	if len(raw) > 0 && string(raw) != "null" {
 		if err := json.Unmarshal(raw, &a); err != nil {
@@ -246,6 +257,8 @@ func (s *Server) invokeManagement(ctx context.Context, name string, raw json.Raw
 			}
 		}
 		return result, nil
+	case "project_verify":
+		return s.verifyProject(ctx, a.Project, a.TestCommand, a.NotebookCommand)
 	case "gradio_scaffold":
 		return s.scaffoldGradio(a.Project, a.TestsPassed)
 	}
@@ -263,6 +276,9 @@ func (s *Server) execWithAudit(ctx context.Context, command, cwd, project, descr
 	out, runErr := s.exec(ctx, command, cwd)
 	status := "ok"
 	if runErr != nil {
+		status = "error"
+	}
+	if result, ok := out.(map[string]any); ok && result["error"] != nil {
 		status = "error"
 	}
 	if recErr := s.projects.Record(project, safeCommand(description), safeCommand(command), status); recErr != nil {

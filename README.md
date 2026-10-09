@@ -159,3 +159,23 @@ La web está implementada en el servidor Go, sin añadir una dependencia Python 
 `project_export` (también disponible en el panel web) escribe **dos archivos** dentro del repositorio del proyecto: `contexto/kagmcp-proyecto.md` legible y `contexto/kagmcp-proyecto.json` restaurable. Tras revisarlos para evitar subir notas sensibles, añade ambos a Git y haz commit/push. En otra sesión, clona ese repositorio y ejecuta **`project_import`** con el ID de la carpeta del proyecto; memoria y tareas vuelven al estado compartido. El historial de comandos permanece local en `.kagmcp/projects.json` y no se exporta automáticamente por seguridad.
 
 El formulario GitHub del panel permite cambiar o quitar el token sin modificar `config.json`; se pierde al reiniciar el proceso. La exportación no realiza `git push` automáticamente.
+
+### Comprobar realmente un proyecto antes de generar Gradio
+
+La herramienta `project_verify` sustituye la declaración manual `tests_passed=true`. Debes registrar primero el proyecto (`project_create`), crear o corregir el repositorio bajo `/kaggle/working/<project_id>/` y versionar sus cambios. Antes de emitir un comprobante, se verifica que el repositorio **esté limpio y tenga commit** y que el cuaderno sea `.ipynb` válido con celdas de código.
+
+Ejemplo de argumentos para `project_verify` (adapta las rutas y los comandos a cada proyecto):
+
+```json
+{
+  "project": "mi-proyecto",
+  "test_command": "python -m pytest -q",
+  "notebook_command": "python -m jupyter nbconvert --to notebook --execute notebooks/run.ipynb --output-dir /tmp --output kagmcp-verificado.ipynb"
+}
+```
+
+Ambos comandos deben concluir satisfactoriamente; los ejecuta el agente autorizado con límites de tiempo y controles del disco, no se confía en la respuesta del cliente. Luego compara el commit de Git y SHA-256 del notebook antes/después y registra un comprobante privado por proyecto. Si cambia el notebook, el commit o hay modificaciones pendientes en Git, `gradio_scaffold` exige **repetir `project_verify`**. `tests_passed` en clientes anteriores se ignora.
+
+La herramienta **no puede evaluar la calidad científica de las pruebas** ni garantiza que un comando exitoso cubra todas las funcionalidades: quien configura los comandos debe seleccionar verificaciones reales del proyecto. El notebook generado por `gradio_scaffold` sigue siendo una **plantilla que hay que conectar a la lógica funcional** y probar después.
+
+El portal `/` ofrece ahora **Exportar** y **Restaurar** la memoria del proyecto desde los archivos JSON/Markdown del repositorio. La restauración recupera notas y tareas, pero invalida comprobantes importados para obligar a repetir las pruebas en el nuevo runtime. Los archivos de contexto pueden contener datos privados y deben revisarse antes de publicarlos.

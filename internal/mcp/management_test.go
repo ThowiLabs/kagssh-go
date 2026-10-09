@@ -36,8 +36,14 @@ func TestManagementToolsProjectSkillAndHistory(t *testing.T) {
 	if !strings.Contains(string(b), "Verificar entorno Kaggle") || !strings.Contains(string(b), "Ejecutar pruebas") {
 		t.Fatalf("estado no persistido: %s", b)
 	}
+	if _, err = call("project_verify", `{"project":"alpha","test_command":"","notebook_command":""}`); err == nil {
+		t.Fatal("permitió comprobante sin ejecutar pruebas")
+	}
 	if _, err = call("gradio_scaffold", `{"project":"alpha","tests_passed":false}`); err == nil {
 		t.Fatal("permitió Gradio sin verificación")
+	}
+	if _, err = call("gradio_scaffold", `{"project":"alpha","tests_passed":true}`); err == nil {
+		t.Fatal("permitió Gradio basándose solo en tests_passed=true")
 	}
 	found := false
 	for _, v := range s.definitions() {

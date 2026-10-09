@@ -18,7 +18,7 @@ func testHandler(t *testing.T) *Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(baseURL, "TEST_LONG_ACCESS_PIN", store, skills.Registry{Dir: t.TempDir()}, nil, func() bool { return false }, nil)
+	return New(baseURL, "TEST_LONG_ACCESS_PIN", store, skills.Registry{Dir: t.TempDir()}, nil, func() bool { return false }, nil, nil)
 }
 func call(h http.Handler, method, path string, values url.Values, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	body := ""
@@ -95,5 +95,36 @@ func TestLoginRateLimits(t *testing.T) {
 	blocked := call(h, "POST", "/login", url.Values{"pin": {"TEST_LONG_ACCESS_PIN"}, "csrf": {c.Value}}, c)
 	if blocked.Code != 429 {
 		t.Fatalf("rate limit inefectivo: %d", blocked.Code)
+	}
+}
+
+func TestImportRequiresSessionAndCSRF(t *testing.T) {
+	h := testHandler(t)
+	called := false
+	h.Import = func(id string) (any, error) { called = id == "alpha"; return map[string]bool{"imported": true}, nil }
+	anonymous := call(h, "POST", "/import", url.Values{"project": {"alpha"}, "csrf": {"x"}})
+	if anonymous.Code != 401 || called {
+		t.Fatalf("acceso no autorizado: %d", anonymous.Code)
+	}
+	page := call(h, "GET", "/login", nil)
+	c := page.Result().Cookies()[0]
+	authenticated := call(h, "POST", "/login", url.Values{"csrf": {c.Value}, "pin": {"TEST_LONG_ACCESS_PIN"}}, c)
+	var session *http.Cookie
+	for _, item := range authenticated.Result().Cookies() {
+		if item.Name == "__Host-kagmcp-session" {
+			session = item
+		}
+	}
+	if session == nil {
+		t.Fatal("faltó sesión")
+	}
+	invalid := call(h, "POST", "/import", url.Values{"project": {"alpha"}, "csrf": {"incorrecto"}}, session)
+	if invalid.Code != 403 || called {
+		t.Fatal("importación sin CSRF permitida")
+	}
+	csrf := h.sessions[key(session.Value)].CSRF
+	valid := call(h, "POST", "/import", url.Values{"project": {"alpha"}, "csrf": {csrf}}, session)
+	if valid.Code != 303 || !called {
+		t.Fatalf("importación autenticada: %d, called=%v", valid.Code, called)
 	}
 }

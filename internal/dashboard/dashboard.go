@@ -34,14 +34,15 @@ type Handler struct {
 	GitHub           func(context.Context, string) (string, error)
 	GitHubConfigured func() bool
 	Export           func(string) (any, error)
+	Import           func(string) (any, error)
 	mu               sync.Mutex
 	sessions         map[string]session
 	failures         map[string]attempts
 	global           attempts
 }
 
-func New(public, pin string, store *projectstate.Store, reg skills.Registry, github func(context.Context, string) (string, error), configured func() bool, export func(string) (any, error)) *Handler {
-	return &Handler{Public: public, pin: sha256.Sum256([]byte(pin)), Projects: store, Skills: reg, GitHub: github, GitHubConfigured: configured, Export: export,
+func New(public, pin string, store *projectstate.Store, reg skills.Registry, github func(context.Context, string) (string, error), configured func() bool, export func(string) (any, error), importProject func(string) (any, error)) *Handler {
+	return &Handler{Public: public, pin: sha256.Sum256([]byte(pin)), Projects: store, Skills: reg, GitHub: github, GitHubConfigured: configured, Export: export, Import: importProject,
 		sessions: map[string]session{}, failures: map[string]attempts{}}
 }
 func random() string {
@@ -217,7 +218,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.login(w, r)
 		return
 	}
-	if r.URL.Path != "/" && r.URL.Path != "/skills" && r.URL.Path != "/project" && r.URL.Path != "/memory" && r.URL.Path != "/task" && r.URL.Path != "/task-status" && r.URL.Path != "/github" && r.URL.Path != "/export" && r.URL.Path != "/logout" {
+	if r.URL.Path != "/" && r.URL.Path != "/skills" && r.URL.Path != "/project" && r.URL.Path != "/memory" && r.URL.Path != "/task" && r.URL.Path != "/task-status" && r.URL.Path != "/github" && r.URL.Path != "/export" && r.URL.Path != "/import" && r.URL.Path != "/logout" {
 		http.NotFound(w, r)
 		return
 	}
@@ -282,6 +283,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_, err = h.Export(r.FormValue("project"))
 		}
+	case "/import":
+		if h.Import == nil {
+			err = errors.New("restauración no disponible")
+		} else {
+			_, err = h.Import(r.FormValue("project"))
+		}
 	case "/github":
 		if h.GitHub == nil {
 			err = errors.New("GitHub no disponible")
@@ -309,7 +316,7 @@ var pageTemplate = template.Must(template.New("dashboard").Parse(`<!doctype html
 <section class="cards"><article class="card"><h2>Nuevo proyecto</h2><form action="/project" method="post"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>ID (a-z, 0-9, - y _)</label><input name="id" placeholder="proyecto-demo" required><label>Nombre</label><input name="name" required><label>Repositorio Git</label><input name="repository" placeholder="owner/repo"><label>Cuaderno</label><input name="notebook" placeholder="notebooks/ejemplo.ipynb"><button>Crear proyecto</button></form></article>
 <article class="card"><h2>GitHub</h2><p>{{if .GitHubOn}}Token activo solo en memoria{{else}}Token no configurado{{end}}. Se comprueba antes de guardarlo; jamás se escribe en disco.</p><form action="/github" method="post"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Personal Access Token</label><input type="password" name="token" autocomplete="off" placeholder="ghp_… / github_pat_…" maxlength="4096"><button>Configurar PAT</button></form><p class="muted">Para desactivar, envía el campo vacío. El token se perderá al reiniciar el proceso.</p></article>
 <article class="card"><h2>Skills</h2><p><strong>Ponytail v2 siempre activa</strong></p>{{range .SkillList}}<div class="entry"><a href="/skills?name={{.Name}}">{{.Name}}</a>{{if .AlwaysActive}} <span class="badge">Siempre activa</span>{{end}}<div class="muted">{{.Description}}</div></div>{{end}}</article></section>
-{{range .Projects}}{{$project := .ID}}<section class="panel"><h2>📁 {{.Name}} <code>{{.ID}}</code></h2><p>Repositorio: {{.Repository}} · Cuaderno: {{.Notebook}}</p><form method="post" action="/export"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><button class="light">Exportar memoria y tareas al repositorio</button></form><div class="cards"><article><h2>Memoria compartida</h2>{{range .Memory}}<p class="entry">{{.}}</p>{{else}}<p>Sin notas todavía.</p>{{end}}<form method="post" action="/memory"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><textarea name="text" placeholder="Decisión técnica o contexto persistente" maxlength="6000" required></textarea><button>Guardar memoria</button></form></article><article><h2>Lista de tareas</h2>{{range .Tasks}}<div class="entry"><strong>{{.Title}}</strong> <span class="muted">{{.Status}}</span><form method="post" action="/task-status" class="flex"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{$project}}"><input type="hidden" name="task" value="{{.ID}}"><select name="status"><option value="pending">Pendiente</option><option value="in_progress">En progreso</option><option value="done">Completa</option></select><button>Actualizar</button></form></div>{{else}}<p>Sin tareas.</p>{{end}}<form method="post" action="/task"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><input name="title" maxlength="300" placeholder="Nueva tarea" required><button>Añadir tarea</button></form></article></div></section>{{end}}
+{{range .Projects}}{{$project := .ID}}<section class="panel"><h2>📁 {{.Name}} <code>{{.ID}}</code></h2><p>Repositorio: {{.Repository}} · Cuaderno: {{.Notebook}}</p>{{if .Verification}}<p class="muted">Pruebas registradas: {{.Verification.TestedAt.Format "2006-01-02 15:04 UTC"}} · commit {{.Verification.GitHead}}</p>{{else}}<p class="muted">Pendiente: ejecutar project_verify antes de generar Gradio.</p>{{end}}<form method="post" action="/export"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><button class="light">Exportar memoria y tareas al repositorio</button></form><form method="post" action="/import"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><button class="light">Restaurar memoria desde el repositorio</button></form><div class="cards"><article><h2>Memoria compartida</h2>{{range .Memory}}<p class="entry">{{.}}</p>{{else}}<p>Sin notas todavía.</p>{{end}}<form method="post" action="/memory"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><textarea name="text" placeholder="Decisión técnica o contexto persistente" maxlength="6000" required></textarea><button>Guardar memoria</button></form></article><article><h2>Lista de tareas</h2>{{range .Tasks}}<div class="entry"><strong>{{.Title}}</strong> <span class="muted">{{.Status}}</span><form method="post" action="/task-status" class="flex"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{$project}}"><input type="hidden" name="task" value="{{.ID}}"><select name="status"><option value="pending">Pendiente</option><option value="in_progress">En progreso</option><option value="done">Completa</option></select><button>Actualizar</button></form></div>{{else}}<p>Sin tareas.</p>{{end}}<form method="post" action="/task"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="project" value="{{.ID}}"><input name="title" maxlength="300" placeholder="Nueva tarea" required><button>Añadir tarea</button></form></article></div></section>{{end}}
 <section class="panel"><h2>Historial de comandos</h2><p>Registro compartido y acotado. Evita introducir secretos en comandos.</p>{{range .History}}<div class="entry"><strong>{{.Description}}</strong> <span class="badge">{{.Status}}</span> <span class="muted">{{.When.Format "2006-01-02 15:04:05"}} · {{.Project}}</span><pre>{{.Command}}</pre></div>{{else}}<p>Aún no hay comandos registrados.</p>{{end}}</section>
 {{if .SkillName}}<section class="panel"><h2>Skill · {{.SkillName}}</h2><pre>{{.SkillContent}}</pre><a href="/skills?name={{.SkillName}}&amp;offset={{.NextOffset}}">Siguiente fragmento →</a></section>{{end}}
 <footer><p>Los datos se almacenan en /kaggle/working/.kagmcp. Versiona el contexto relevante antes de destruir el runtime.</p><p><a href="/">Volver al inicio</a></p></footer>{{end}}</body></html>`))

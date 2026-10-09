@@ -195,3 +195,18 @@ El PAT de GitHub configurado desde el panel se verifica contra la API y solo que
 `project_export` (también disponible en el panel web) escribe **dos archivos** dentro del repositorio del proyecto: `contexto/kagmcp-proyecto.md` legible y `contexto/kagmcp-proyecto.json` restaurable. Tras revisarlos para evitar subir notas sensibles, añade ambos a Git y haz commit/push. En otra sesión, clona ese repositorio y ejecuta **`project_import`** con el ID de la carpeta del proyecto; memoria y tareas vuelven al estado compartido. El historial de comandos permanece local en `.kagmcp/projects.json` y no se exporta automáticamente por seguridad.
 
 El formulario GitHub del panel permite cambiar o quitar el token sin modificar `config.json`; se pierde al reiniciar el proceso. La exportación no realiza `git push` automáticamente.
+
+## 12. Verificación ejecutada de proyecto (necesaria antes de Gradio)
+
+Una marca `tests_passed=true` escrita por un agente **ya no es suficiente** para permitir la generación de Gradio.
+
+1. Crea el proyecto en el panel o usando `project_create`. El ID coincide con la carpeta `/kaggle/working/<project_id>`, que debe ser un repositorio Git con commit. Configura el notebook relativo al repo.
+2. Corrige el código y notebook, realiza las pruebas pertinentes y haz commit. Debe quedar limpio `git status --porcelain`.
+3. Invoca `project_verify` indicando `project`, `test_command` (tests reales) y `notebook_command` (ejecución real del notebook). Cada uno se ejecuta en la carpeta del proyecto con los límites de ejecución establecidos.
+4. Si los dos terminan sin errores, y el repositorio Git y notebook siguen intactos, KagMCP guarda un comprobante en `.kagmcp/projects.json`: fecha, commit Git y SHA256 del notebook y de los comandos de prueba. **No guarda el contenido de los comandos de verificación** en el comprobante, pero sí quedan registrados en el historial de `exec` con filtrado preventivo de secretos.
+5. Solo entonces puede ejecutarse `gradio_scaffold(project)`. Si cambió el commit o notebook, si hay archivos Git pendientes o si se importó el proyecto a un runtime nuevo, deben repetirse las pruebas.
+6. Conecta `app.py` a la lógica REAL del proyecto, genera y versiona `requirements-gradio.lock` con hashes, instala desde el lock, ejecuta y prueba Gradio antes de entregar.
+
+Ejemplo de verificación: `test_command="python -m pytest -q"`, `notebook_command="python -m jupyter nbconvert --to notebook --execute notebooks/run.ipynb --output-dir /tmp --output kagmcp-verificado.ipynb"`. Ajusta las opciones para no escribir dentro del repositorio durante las pruebas. El servidor valida éxito técnico, no garantiza que los tests elegidos cubran los casos esenciales.
+
+El panel `/` muestra el estado de verificación y dispone de **Restaurar memoria** desde el contexto JSON que previamente exportaste y versionaste. Importar nunca supone pruebas realizadas en esta nueva sesión.

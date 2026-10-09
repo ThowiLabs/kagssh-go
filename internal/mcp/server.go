@@ -84,7 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.auth.RegisterRoutes(mux)
 	mux.Handle("/mcp", s)
-	mux.Handle("/", dashboard.New(s.public, s.cfg.MCPAccessPIN, s.projects, s.skills, s.configureGitHub, s.githubConfigured, s.projectExport))
+	mux.Handle("/", dashboard.New(s.public, s.cfg.MCPAccessPIN, s.projects, s.skills, s.configureGitHub, s.githubConfigured, s.projectExport, s.projectImport))
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = io.WriteString(w, "KagMCP OK\n")
@@ -348,7 +348,8 @@ func (s *Server) definitions() []any {
 		def("tasks_add", "Añade una tarea del proyecto", map[string]any{"project": stringProp("ID"), "title": stringProp("Tarea")}, "project", "title"),
 		def("tasks_update", "Actualiza tarea pending/in_progress/done", map[string]any{"project": stringProp("ID"), "task": stringProp("ID tarea"), "status": stringProp("Estado")}, "project", "task", "status"),
 		def("history_list", "Consulta historial de comandos con descripción", map[string]any{"project": stringProp("ID, opcional")}),
-		def("gradio_scaffold", "Solo tras verificar pruebas, genera Gradio fijado en repo con notebook válido", map[string]any{"project": stringProp("ID de proyecto"), "tests_passed": map[string]any{"type": "boolean"}}, "project", "tests_passed"),
+		def("project_verify", "Ejecuta las pruebas y el notebook, exige Git limpio y registra el commit/digest antes de Gradio", map[string]any{"project": stringProp("ID de proyecto"), "test_command": stringProp("Comando reproducible de tests"), "notebook_command": stringProp("Comando que ejecuta el notebook y comprueba su funcionamiento")}, "project", "test_command", "notebook_command"),
+		def("gradio_scaffold", "Genera plantilla Gradio solo con comprobante vigente de project_verify", map[string]any{"project": stringProp("ID de proyecto")}, "project"),
 		def("github_status", "Valida GITHUB_TOKEN y muestra cuenta autenticada", map[string]any{}),
 		def("github_repositories", "Lista repositorios accesibles con GITHUB_TOKEN (100 recientes)", map[string]any{}),
 		def("github_branches", "Lista ramas de un repositorio", map[string]any{"repository": stringProp("owner/repo")}, "repository"),
