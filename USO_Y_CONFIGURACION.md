@@ -218,7 +218,7 @@ El panel `/` muestra el estado de verificación y dispone de **Restaurar memoria
 
 Por defecto el notebook pasa `MCP_TUNNEL="auto"` y `MCP_GRADIO_RETRIES=3`, con este orden:
 
-1. El binario Go consulta la API oficial `https://api.gradio.app/v3/tunnel-request`, descarga FRP v0.3 del CDN oficial de Hugging Face **solo si no existe en caché** y verifica su SHA-256 fijado (actualización explícita, nunca automática). No instala el paquete Python Gradio.
+1. El binario Go consulta la API oficial `https://api.gradio.app/v3/tunnel-request` y establece una sesión **FRP nativa en Go** (protocolo 0.44 compatible con Gradio, TLS, yamux y mensajes cifrados). **No descarga ni ejecuta `frpc` ni instala Gradio Python**. Las versiones de las bibliotecas Go están fijadas en `go.mod` y `go.sum`.
 2. Arranca el servidor HTTP local `127.0.0.1:8181` para ofrecer una prueba temporal `/api/health`, después inicia FRP, obtiene la URL `https://<aleatorio>.gradio.live` y verifica por HTTPS que dicha ruta responde el desafío único de **este proceso KagMCP**.
 3. Si no se pudo abrir el enlace o la ruta pública no responde, cierra FRP y repite hasta tres intentos (editable 1–5). Si todos fallan, utiliza automáticamente **cloudflared**, verificando también que su URL publique el mismo proceso. En los logs se muestra qué proveedor se eligió.
 4. Una vez confirmada la URL, activa OAuth y el panel web. El log anuncia `url=https://.../mcp` y `panel_web=https://.../`.
@@ -232,7 +232,7 @@ Por defecto el notebook pasa `MCP_TUNNEL="auto"` y `MCP_GRADIO_RETRIES=3`, con e
 
 En el notebook, `GRADIO_RETRIES=3` se traduce a `MCP_GRADIO_RETRIES=3`. Si necesitas otra cifra, configura entre 1 y 5. **No** utilices `gradio` si deseas que cambie de proveedor automáticamente: usa `auto`.
 
-El túnel Gradio utiliza los ejecutables oficiales FRP v0.3 y verifica sus checksums del código del proyecto Gradio, como `frpc_linux_amd64` (SHA-256 `c791d1f047b41ff5885772fc4bf20b797c6059bbd82abb9e31de15e55d6a57c4`). Los ejecutables se guardan en una caché privada de `/kaggle/working/.kagmcp/cache/kagmcp/frp-v0.3/`. El TLS hacia el servidor FRP se verifica con el certificado CA de la API oficial.
+El túnel Gradio **no utiliza ejecutables FRP externos**: el protocolo está implementado en `internal/gradiolive/native_client.go` y los mensajes FRP compatibles se conservan con atribución Apache 2.0 en `internal/frpmsg`. Las dependencias directas están fijadas a `github.com/fatedier/golib v0.1.1-0.20220321042308-c306138b83ac` y `github.com/hashicorp/yamux v0.1.1`. El TLS verifica la CA entregada por la API oficial. Las futuras actualizaciones deben ser explícitas y probadas.
 
 **Aclaración:** compartir el servidor Go de KagMCP a través de `gradio.live` **no crea una interfaz de Gradio en Python**. El panel sigue siendo Go, las herramientas siguen siendo MCP y OAuth/PIN siguen protegiendo las rutas administrativas. Las URL temporales pueden caducar o interrumpirse; una caída *posterior* a la conexión no cambia silenciosamente la URL OAuth del cliente ya vinculado. Si el túnel muere después del arranque, reinicia la celda y vuelve a conectar el cliente si cambió el enlace. No compartas el PIN ni los logs que lo incluyen.
 
@@ -245,3 +245,39 @@ El formulario del panel `https://.../` ya **no exige que la cabecera HTTP `Origi
 Si el navegador no guarda la cookie, el formulario devuelve una explicación accionable. Si el PIN es erróneo, muestra «PIN incorrecto» sin revelar datos privados. Para probar después de actualizar el servidor Go, abre la **URL raíz anunciada en el log** (`panel_web=https://...gradio.live/` o `panel_web=https://...trycloudflare.com/`) directamente en una pestaña del navegador, introduce el PIN activo y evita abrir el panel dentro de un iframe que bloquee cookies. No es necesario cambiar el PIN ni deshabilitar su seguridad.
 
 Pruebas automatizadas de login a través de proxy: `Origin` vacío, `null`, reescrito y extraño con cookie/token correctos; se rechazan cookies ausentes y tokens falsos con HTTP 403; formularios protegidos después del login requieren su CSRF; se informa de errores de parseo sin mostrar credenciales.
+
+## Integración ampliada de GitHub desde MCP (PAT)
+
+Los agentes OAuth autorizados pueden acceder **directamente a la API REST y GraphQL de GitHub**, sin necesitar instalar el ejecutable `git` para esas operaciones. El cliente envía el PAT únicamente en `Authorization: Bearer ...`, fija `X-GitHub-Api-Version: 2022-11-28`, rechaza redirecciones y rutas fuera del servidor configurado de GitHub. El PAT sigue pudiéndose configurar desde el panel web `/` o en la celda privada `configurar`.
+
+**Herramientas nuevas:**
+
+| Grupo | Herramientas MCP |
+|---|---|
+| API general | `github_api` (REST con GET, POST, PUT, PATCH, DELETE), `github_graphql` (queries y mutaciones) |
+| Repositorios | `github_repo_create` (obliga a declarar `private: true/false`), `github_repo_delete` |
+| Ramas | `github_branch_create`, `github_branch_delete` |
+| Archivos | `github_file_delete`, junto a `github_file_read` y `github_file_write` existentes |
+| Pull Requests | `github_pr_create`, `github_pr_merge` |
+| Issues | `github_issue_create`, `github_issue_update` |
+| Releases y Actions | `github_release_create`, `github_workflow_dispatch`, `github_workflows` |
+
+La herramienta `github_api` permite además acceder a los endpoints REST que no cuentan con una herramienta especializada, por ejemplo administrar comentarios, revisiones de PR, etiquetas, colaboradores, equipos, reglas de rama, forks, Git Trees/Commits, etiquetas, deployments, webhooks, acciones de workflow, repositorios de organización y sus configuraciones. `github_graphql` permite consultas y mutaciones GraphQL. Ninguna herramienta salta restricciones de permisos: **la operación solo puede realizarse si el PAT tiene los permisos requeridos y GitHub la permite**. Algunas rutas requieren paginación, cuerpos JSON específicos, cifrado de secretos o subida binaria fuera de la API JSON: consulta los requisitos del endpoint.
+
+Ejemplo de herramienta genérica `github_api` para listar PR:
+
+```json
+{"method":"GET","endpoint":"/repos/owner/repo/pulls?state=open&per_page=100"}
+```
+
+Ejemplo de `github_api` para actualizar un repositorio:
+
+```json
+{"method":"PATCH","endpoint":"/repos/owner/repo","json_body":"{\"description\":\"Proyecto verificado en Kaggle\"}"}
+```
+
+Crear un repo **privado** requiere `github_repo_create` con `name` y `private=true`. Se rechaza si `private` no está especificado, evitando publicar accidentalmente un proyecto.
+
+Eliminar repositorios, ramas, archivos, fusionar PR y cambiar permisos son acciones potencialmente irreversibles: los agentes deben **pedir autorización explícita** antes de realizarlas. No compartas PAT ni lo insertes en `endpoint` o en registros de comandos. Un PAT con poderes administrativos compartido con agentes tiene un riesgo alto: limita repositorios y permisos cuando sea posible.
+
+**Límites actuales:** máximo de 1 MiB para solicitudes JSON `github_api` y 2 MiB para la respuesta JSON por llamada. Para repositorios completos y commits múltiples, usa los endpoints Git Trees/Git Commits con varias llamadas o Git de la shell local. Release assets binarios y ciertos endpoints de cargas multimedia necesitan lógica de subida distinta y no están cubiertos por el cliente JSON genérico.

@@ -384,9 +384,26 @@ func (s *Server) definitions() []any {
 		def("github_branches", "Lista ramas de un repositorio", map[string]any{"repository": stringProp("owner/repo")}, "repository"),
 		def("github_file_read", "Lee un archivo mediante API GitHub", map[string]any{"repository": stringProp("owner/repo"), "path": stringProp("ruta relativa"), "ref": stringProp("rama o SHA opcional")}, "repository", "path"),
 		def("github_file_write", "Crea o actualiza un archivo mediante API GitHub y genera un commit", map[string]any{"repository": stringProp("owner/repo"), "path": stringProp("ruta relativa"), "branch": stringProp("rama destino"), "message": stringProp("mensaje de commit"), "content": stringProp("contenido completo"), "sha": stringProp("SHA anterior obligatorio al actualizar")}, "repository", "path", "branch", "message", "content"),
+		def("github_api", "Acceso REST GitHub completo (GET/POST/PATCH/PUT/DELETE) con PAT y ruta API. Autorizar acciones destructivas.", map[string]any{"method": stringProp("method"), "endpoint": stringProp("endpoint"), "json_body": stringProp("json_body")}, "method", "endpoint"),
+		def("github_graphql", "Consultas y mutaciones GraphQL autenticadas con PAT; todas las capacidades permitidas por scopes.", map[string]any{"query": stringProp("query"), "variables": stringProp("variables")}, "query"),
+		def("github_repo_create", "Crear repositorio personal o de organización.", map[string]any{"name": stringProp("name"), "description": stringProp("description"), "private": map[string]any{"type": "boolean"}, "owner_type": stringProp("owner_type"), "organization": stringProp("organization")}, "name", "private"),
+		def("github_repo_delete", "Eliminar repositorio en GitHub; peligro, requiere autorización explícita.", map[string]any{"repository": stringProp("repository")}, "repository"),
+		def("github_branch_create", "Crear rama desde un SHA Git.", map[string]any{"repository": stringProp("repository"), "branch": stringProp("branch"), "from_sha": stringProp("from_sha")}, "repository", "branch", "from_sha"),
+		def("github_branch_delete", "Eliminar rama remota; requiere autorización explícita.", map[string]any{"repository": stringProp("repository"), "branch": stringProp("branch")}, "repository", "branch"),
+		def("github_file_delete", "Eliminar archivo mediante GitHub Contents API y registrar commit.", map[string]any{"repository": stringProp("repository"), "path": stringProp("path"), "branch": stringProp("branch"), "sha": stringProp("sha"), "message": stringProp("message")}, "repository", "path", "branch", "sha", "message"),
+		def("github_pr_create", "Crear Pull Request.", map[string]any{"repository": stringProp("repository"), "title": stringProp("title"), "head": stringProp("head"), "base": stringProp("base"), "body": stringProp("body")}, "repository", "title", "head", "base"),
+		def("github_pr_merge", "Fusionar Pull Request; puede activar Actions.", map[string]any{"repository": stringProp("repository"), "number": map[string]any{"type": "integer"}, "merge_method": stringProp("merge_method"), "message": stringProp("message")}, "repository", "number"),
+		def("github_issue_create", "Crear Issue.", map[string]any{"repository": stringProp("repository"), "title": stringProp("title"), "body": stringProp("body")}, "repository", "title"),
+		def("github_issue_update", "Actualizar Issue con JSON de campos.", map[string]any{"repository": stringProp("repository"), "number": map[string]any{"type": "integer"}, "json_body": stringProp("json_body")}, "repository", "number", "json_body"),
+		def("github_release_create", "Crear Release de GitHub.", map[string]any{"repository": stringProp("repository"), "tag_name": stringProp("tag_name"), "name": stringProp("name"), "body": stringProp("body")}, "repository", "tag_name"),
+		def("github_workflow_dispatch", "Ejecutar workflow de GitHub Actions.", map[string]any{"repository": stringProp("repository"), "workflow": stringProp("workflow"), "ref": stringProp("ref"), "inputs": stringProp("inputs")}, "repository", "workflow", "ref"),
+		def("github_workflows", "Listar workflows de GitHub Actions.", map[string]any{"repository": stringProp("repository")}, "repository"),
 	}
 }
 func (s *Server) invoke(ctx context.Context, name string, raw json.RawMessage) (any, error) {
+	if githubExtendedTool(name) {
+		return s.invokeGitHubExtended(ctx, name, raw)
+	}
 	if managementTool(name) {
 		return s.invokeManagement(ctx, name, raw)
 	}

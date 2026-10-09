@@ -27,7 +27,7 @@ func New(token string) *Client {
 }
 func (c *Client) Request(ctx context.Context, method, path string, body io.Reader, result any) error {
 	if c.token == "" {
-		return errors.New("GITHUB_TOKEN no configurado; agrégalo a Kaggle Secrets")
+		return errors.New("GITHUB_TOKEN/PAT no configurado; introdúcelo desde el panel web o la celda configurar del notebook")
 	}
 	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "\r\n") {
 		return errors.New("ruta GitHub inválida")
