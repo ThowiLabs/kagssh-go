@@ -14,6 +14,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
+      - name: Confirmar Go con parches de seguridad
+        run: go version
+      - name: Validar notebook Kaggle (JSON y sintaxis Python)
+        run: python3 scripts/check_notebook.py
       - name: Pruebas completas e integración SSH local
         run: go test -timeout 90s ./...
       - name: Análisis estático

@@ -1,6 +1,8 @@
 # Uso y configuración de KagSSH Go
 
-**Estado: 8 de octubre de 2026.** Esta guía describe el código que ya existe. La lectura de Kaggle Secrets y el túnel completo **todavía no se han probado en una notebook real**: las pruebas actuales son unitarias/simuladas y de compilación.
+**Estado: 9 de octubre de 2026.** Esta guía describe el código que ya existe. La lectura de Kaggle Secrets y el túnel completo **todavía no se han probado en una notebook real**: las pruebas actuales son unitarias/simuladas y de compilación.
+
+**Caso de uso con agentes:** el objetivo es facilitar que **ChatGPT u otro agente que sí tenga una herramienta SSH/terminal** pueda acceder al runtime de Kaggle, **reparar notebooks rotos** y **crear o depurar proyectos de machine learning**. Esta herramienta es el medio de acceso remoto, no una conexión nativa del chat de ChatGPT, ni una API de ChatGPT, ni un servidor MCP, ni una función que repare notebooks por sí sola. Hay un [notebook de demostración con pasos de arranque y cierre](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb). Las ediciones por SSH a archivos `.ipynb` tampoco sincronizan automáticamente las celdas abiertas en la interfaz de Kaggle.
 
 ## 1. Qué hace el programa
 
@@ -20,7 +22,9 @@ PC ──SSH──> VPS:2223 ──forward inverso──> Kaggle:127.0.0.1:2224
 
 Necesitas un notebook de Kaggle con Internet para contactar con el VPS; tu VPS debe tener servidor SSH en funcionamiento, autorizar TCP reverse forwarding y disponer de las credenciales y la huella del host previamente verificada.
 
-El ejecutable para notebooks Kaggle x86_64 es `dist/kagssh-linux-amd64`. Debes adjuntarlo/subirlo al notebook. La ruta de ejecución que usamos es `/kaggle/working/kagssh-linux-amd64`.
+**Forma recomendada:** abre el [notebook de instalación y conexión](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle. Este clona `https://github.com/ThowiLabs/kagssh-go`, comprueba la versión requerida en `go.mod`, descarga **Go desde go.dev con verificación SHA-256** si hace falta, y compila el binario como `/kaggle/working/kagssh-linux-amd64`. Requiere Internet y no necesita adjuntar un ejecutable ni escribir Secrets en las celdas.
+
+**Alternativa manual:** el ejecutable precompilado para notebooks Kaggle x86_64 es `dist/kagssh-linux-amd64`. Puedes adjuntarlo/subirlo al notebook y ejecutarlo desde `/kaggle/working/kagssh-linux-amd64`. Utiliza una compilación actualizada con Go 1.26.9 o posterior; los binarios anteriores no se parchean automáticamente.
 
 Si adjuntas el binario como Kaggle Dataset/Input, copiarlo desde el Input (solo lectura) al directorio de trabajo:
 

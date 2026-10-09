@@ -1,8 +1,20 @@
 # KagSSH Go
 
+**Notebook de ejemplo:** [Conectar Kaggle con ChatGPT u otros agentes mediante SSH](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb).
+
+**¿Para qué está pensado?** Permite que un agente de IA, como ChatGPT **cuando dispone de una herramienta SSH/terminal autorizada**, acceda a un entorno de Kaggle para **diagnosticar y corregir cuadernos dañados**, depurar código y desarrollar proyectos de **machine learning y aprendizaje**. KagSSH Go proporciona el acceso SSH/SFTP al runtime mediante un VPS; no automatiza por sí mismo la reparación ni el entrenamiento.
+
+**Para evitar confusiones:** **no** conecta automáticamente el chat de ChatGPT a Kaggle, **no** es una integración oficial, **no** es una API de ChatGPT y **no** implementa un servidor MCP. Hace falta un VPS con SSH y un agente/cliente capaz de usar SSH de forma autorizada. La ejecución real con Kaggle y un VPS aún está pendiente de pruebas de integración.
+
 **Guía completa de instalación, Secrets y ejecución en Kaggle:** [USO_Y_CONFIGURACION.md](USO_Y_CONFIGURACION.md).
 
 Un solo binario Linux estático, sin dependencias de Python, OpenSSH Server ni cliente SSH en **Kaggle**. Incluye servidor SSH con shell/PTY/SFTP y cliente SSH para publicar un túnel inverso en tu VPS.
+
+## Inicio recomendado: notebook que clona el repositorio y compila en Kaggle
+
+Abre [`notebooks/kagssh_kaggle_chatgpt_agentes.ipynb`](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle con acceso a Internet. Ejecuta sus celdas en orden: **clona** `https://github.com/ThowiLabs/kagssh-go`, utiliza el Go instalado si cumple la versión mínima de `go.mod` o **descarga y verifica** el Go oficial necesario, compila el binario Linux y luego valida configuración/inicia el túnel. **No hace falta adjuntar un binario previamente compilado.**
+
+Puedes configurar los parámetros como **Kaggle Secrets individuales** (Add-ons → Secrets) o **variables de entorno `SSH_*`**; usa Secrets para contraseñas. Las etiquetas, alternativas, puertos y prioridades se detallan abajo y en la guía.
 
 ## Arranque sin exports desde Kaggle Secrets
 
@@ -40,7 +52,7 @@ Puedes añadir estas etiquetas para cambiar los puertos y comportamiento:
 
 ### Ejecutar en Kaggle sin configurar variables en la celda
 
-Tras subir el binario a `/kaggle/working/`:
+Tras compilar con el notebook recomendado (o subir manualmente un binario actualizado) en `/kaggle/working/`:
 
 ```bash
 !chmod +x /kaggle/working/kagssh-linux-amd64
