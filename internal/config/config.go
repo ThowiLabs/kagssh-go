@@ -17,7 +17,7 @@ import (
 var names = []string{
 	"SSH_HOST", "SSH_USER", "SSH_PASSWORD", "SSH_KEY", "SSH_FINGERPRINT",
 	"SSH_KNOWN_HOSTS", "SSH_PORT_REMOTE", "SSH_PORT_KAGGLE", "SSH_PORT_LOCAL",
-	"SSH_REMOTE_BIND", "SSH_LOGIN_USER", "SSH_LOGIN_PASSWORD",
+	"SSH_LOGIN_USER", "SSH_LOGIN_PASSWORD",
 	"SSH_AUTHORIZED_KEYS", "SSH_HOST_KEY",
 }
 
@@ -25,7 +25,6 @@ type Config struct {
 	Listen, HostKey, LoginUser, LoginPassword, AuthorizedKeys            string
 	VPSHost, VPSUser, VPSPassword, VPSKey, VPSKnownHosts, VPSFingerprint string
 	VPSPort, RemotePort                                                  int
-	RemoteBind                                                           string
 	Retry                                                                time.Duration
 }
 
@@ -108,7 +107,7 @@ func parse(v map[string]string) (Config, error) {
 		LoginUser:      value("SSH_LOGIN_USER", login),
 		LoginPassword:  value("SSH_LOGIN_PASSWORD", ""),
 		AuthorizedKeys: value("SSH_AUTHORIZED_KEYS", ""),
-		VPSHost:        value("SSH_HOST", "fp.thowilabs.com"),
+		VPSHost:        value("SSH_HOST", ""),
 		VPSUser:        value("SSH_USER", "root"),
 		VPSPassword:    value("SSH_PASSWORD", ""),
 		VPSKey:         value("SSH_KEY", ""),
@@ -116,7 +115,6 @@ func parse(v map[string]string) (Config, error) {
 		VPSFingerprint: value("SSH_FINGERPRINT", ""),
 		VPSPort:        vpsPort,
 		RemotePort:     remotePort,
-		RemoteBind:     value("SSH_REMOTE_BIND", "127.0.0.1"),
 		Retry:          5 * time.Second,
 	}
 	return c, c.Validate()
@@ -133,7 +131,7 @@ func (c Config) Validate() error {
 		return errors.New("configura SSH_PASSWORD o SSH_KEY en Secrets o export")
 	}
 	if c.VPSHost == "" || strings.ContainsAny(c.VPSHost, "\r\n\x00") {
-		return errors.New("SSH_HOST inválido")
+		return errors.New("SSH_HOST: configura la IP pública o dominio de tu VPS en Kaggle Secrets o en el entorno")
 	}
 	if c.VPSUser == "" || strings.ContainsAny(c.VPSUser, "\r\n\x00") {
 		return errors.New("SSH_USER inválido")
@@ -150,9 +148,6 @@ func (c Config) Validate() error {
 	}
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return fmt.Errorf("SSH_PORT_LOCAL inválido: %w", err)
-	}
-	if c.RemoteBind != "127.0.0.1" && c.RemoteBind != "0.0.0.0" && c.RemoteBind != "::1" {
-		return errors.New("SSH_REMOTE_BIND debe ser 127.0.0.1, ::1 o 0.0.0.0")
 	}
 	if c.VPSPort < 1 || c.VPSPort > 65535 || c.RemotePort < 1 || c.RemotePort > 65535 {
 		return errors.New("puerto fuera de rango")

@@ -88,7 +88,7 @@ func connect(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	}
 	client := ssh.NewClient(sshConn, chans, reqs)
 	defer client.Close()
-	remoteAddr := net.JoinHostPort(cfg.RemoteBind, strconv.Itoa(cfg.RemotePort))
+	remoteAddr := net.JoinHostPort("0.0.0.0", strconv.Itoa(cfg.RemotePort))
 	listener, err := client.Listen("tcp", remoteAddr)
 	if err != nil {
 		return fmt.Errorf("publicar %s en VPS: %w", remoteAddr, err)

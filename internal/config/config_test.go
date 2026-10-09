@@ -27,7 +27,7 @@ func TestValidate(t *testing.T) {
 	base := Config{
 		Listen: "127.0.0.1:2224", LoginUser: "root", LoginPassword: "local",
 		VPSHost: "example.org", VPSUser: "root", VPSPassword: "remote", VPSPort: 22,
-		VPSFingerprint: "SHA256:verificada", RemoteBind: "127.0.0.1", RemotePort: 2223,
+		VPSFingerprint: "SHA256:verificada", RemotePort: 2223,
 	}
 	tests := []struct {
 		name   string
@@ -39,7 +39,6 @@ func TestValidate(t *testing.T) {
 		{"sin credenciales del VPS", func(c *Config) { c.VPSPassword = "" }, "SSH_PASSWORD"},
 		{"usuario inválido", func(c *Config) { c.LoginUser = "root\nother" }, "usuario local"},
 		{"escucha inválida", func(c *Config) { c.Listen = "2224" }, "SSH_PORT_LOCAL"},
-		{"bind remoto no permitido", func(c *Config) { c.RemoteBind = "8.8.8.8" }, "SSH_REMOTE_BIND"},
 		{"puerto inválido", func(c *Config) { c.RemotePort = 0 }, "puerto"},
 		{"known_hosts ausente se inicializará", func(c *Config) {
 			c.VPSFingerprint = ""
@@ -73,15 +72,14 @@ func TestLoad_SecretIndependienteYPuertos(t *testing.T) {
 		"SSH_PORT_REMOTE":    "2200",
 		"SSH_PORT_KAGGLE":    "4321",
 		"SSH_PORT_LOCAL":     "2233",
-		"SSH_REMOTE_BIND":    "0.0.0.0",
 		"SSH_FINGERPRINT":    "SHA256:validada",
 	}}
 	cfg, err := Load(context.Background(), func(string) (string, bool) { return "", false }, secrets)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.VPSHost != "vps.example" || cfg.VPSPort != 2200 || cfg.RemotePort != 4321 || cfg.Listen != "127.0.0.1:2233" || cfg.RemoteBind != "0.0.0.0" {
-		t.Fatalf("puertos y host incorrectos: host=%s vps=%d remoto=%d local=%s bind=%s", cfg.VPSHost, cfg.VPSPort, cfg.RemotePort, cfg.Listen, cfg.RemoteBind)
+	if cfg.VPSHost != "vps.example" || cfg.VPSPort != 2200 || cfg.RemotePort != 4321 || cfg.Listen != "127.0.0.1:2233" {
+		t.Fatalf("puertos y host incorrectos: host=%s vps=%d remoto=%d local=%s", cfg.VPSHost, cfg.VPSPort, cfg.RemotePort, cfg.Listen)
 	}
 	if len(secrets.seen) != len(names) {
 		t.Fatalf("consultas: %d, esperaba %d", len(secrets.seen), len(names))
@@ -91,7 +89,7 @@ func TestLoad_SecretIndependienteYPuertos(t *testing.T) {
 func TestLoad_ExportSobrescribeSecret(t *testing.T) {
 	f := &fakeSecrets{values: map[string]string{
 		"SSH_PORT_KAGGLE": "3333", "SSH_PASSWORD": "desde-secrets",
-		"SSH_LOGIN_PASSWORD": "local",
+		"SSH_LOGIN_PASSWORD": "local", "SSH_HOST": "vps.example",
 	}}
 	explicit := map[string]string{"SSH_PORT_KAGGLE": "4444", "SSH_PASSWORD": "desde-export"}
 	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := explicit[k]; return v, ok }, f)
@@ -109,7 +107,7 @@ func TestLoad_ExportSobrescribeSecret(t *testing.T) {
 }
 
 func TestLoad_DefaultsSinKaggle(t *testing.T) {
-	values := map[string]string{"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local", "SSH_FINGERPRINT": "SHA256:verificada"}
+	values := map[string]string{"SSH_HOST": "203.0.113.10", "SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local", "SSH_FINGERPRINT": "SHA256:verificada"}
 	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +134,7 @@ func TestLoad_ErroresEnSecretYValidacion(t *testing.T) {
 
 func TestLoad_AutoKnownHostsSinNuevaVariable(t *testing.T) {
 	values := map[string]string{
-		"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local",
+		"SSH_HOST": "203.0.113.10", "SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local",
 		"SSH_KNOWN_HOSTS": filepath.Join(t.TempDir(), ".ssh", "known_hosts"),
 	}
 	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
@@ -150,7 +148,7 @@ func TestLoad_AutoKnownHostsSinNuevaVariable(t *testing.T) {
 
 func TestLoad_RutaKnownHostsPredeterminada(t *testing.T) {
 	values := map[string]string{
-		"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local",
+		"SSH_HOST": "203.0.113.10", "SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local",
 	}
 	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
 	if err != nil {
@@ -158,5 +156,13 @@ func TestLoad_RutaKnownHostsPredeterminada(t *testing.T) {
 	}
 	if cfg.VPSKnownHosts == "" {
 		t.Fatal("no definió la ubicación predeterminada de known_hosts")
+	}
+}
+
+func TestLoad_RequiereHostDelVPS(t *testing.T) {
+	values := map[string]string{"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local"}
+	_, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
+	if err == nil || !strings.Contains(err.Error(), "SSH_HOST") {
+		t.Fatalf("el binario no debe emplear dominios corporativos predeterminados: %v", err)
 	}
 }

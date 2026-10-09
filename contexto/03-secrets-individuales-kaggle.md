@@ -8,7 +8,7 @@ Incorporar lectura nativa de Kaggle Secrets individuales y usar exactamente los 
 - SSH_PORT_REMOTE = puerto del daemon SSH real del VPS (por defecto 22).
 - SSH_PORT_KAGGLE = puerto publicado por el reverse SSH en el VPS (por defecto 2223).
 - SSH_PORT_LOCAL = puerto servidor SSH interno de Kaggle (por defecto 2224).
-- Resto: SSH_HOST, SSH_USER, SSH_PASSWORD, SSH_LOGIN_PASSWORD, SSH_FINGERPRINT, SSH_REMOTE_BIND, SSH_KEY, SSH_KNOWN_HOSTS, SSH_LOGIN_USER, SSH_AUTHORIZED_KEYS, SSH_HOST_KEY.
+- Resto: SSH_HOST, SSH_USER, SSH_PASSWORD, SSH_LOGIN_PASSWORD, SSH_FINGERPRINT, SSH_KEY, SSH_KNOWN_HOSTS, SSH_LOGIN_USER, SSH_AUTHORIZED_KEYS, SSH_HOST_KEY.
 - Prioridad: export explícito > Secret por etiqueta > default seguro. Sin token Kaggle, solo export/default.
 - Leer por HTTPS POST /requests/GetUserSecretByLabelRequest siguiendo el cliente oficial de Kaggle. Se usa token de entorno KAGGLE_USER_SECRETS_TOKEN y, si está presente, KAGGLE_IAP_TOKEN, asignados por Kaggle, no por el usuario.
 - No añadir dependencias nuevas: solo net/http, encoding/json, context y paquete estándar.
@@ -49,7 +49,7 @@ govulncheck con GOOS=linux reportó cero vulnerabilidades alcanzables; una adver
 Secrets nunca incluidos en mensajes de error ni entorno de shells autenticadas.
 Sin verificar Kaggle en vivo aún, protocolo extraído del repositorio oficial.
 Huella SSH del VPS debe configurarse por valor confiable o known_hosts.
-Puerto público opt-in con SSH_REMOTE_BIND=0.0.0.0.
+Actualización: puerto público solicitado siempre en 0.0.0.0. El VPS requiere GatewayPorts y firewall.
 No almacenar contraseñas reales en repo; rotar las anteriormente expuestas.
 
 # Pendientes

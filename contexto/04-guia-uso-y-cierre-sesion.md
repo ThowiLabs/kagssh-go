@@ -9,8 +9,8 @@ Cerrar la sesión actual de KagSSH Go con una guía de uso y configuración sufi
 - Crear USO_Y_CONFIGURACION.md en la raíz y enlazarlo desde README.md.
 - Documentar tres modalidades: Secrets individuales de Kaggle, exports en celda y mezcla con precedencia export > Secret > default.
 - Registrar SSH_PORT_REMOTE=22 (SSH del VPS), SSH_PORT_KAGGLE=2223 (puerto inverso del VPS) y SSH_PORT_LOCAL=2224 (servidor local Kaggle).
-- Mostrar preparación del binario en /kaggle/working, celda %%bash, comando -check, acceso privado mediante doble salto/túnel local, y acceso externo opt-in.
-- Recomendar SSH_REMOTE_BIND=127.0.0.1 por defecto y exigir huella SSH verificada.
+- Mostrar preparación del binario en /kaggle/working, celda %%bash, comando -check, acceso externo directo por IP pública del VPS.
+- Actualización posterior: túnel solicitado siempre en 0.0.0.0; huella verificada o primera clave registrada automáticamente.
 - No confundir KagSSH Go con la idea posterior de Kaggle MCP: queda explícitamente pospuesta, sin código ni planificación comprometida.
 
 # Arquitectura en este cierre
@@ -31,7 +31,7 @@ Cerrar la sesión actual de KagSSH Go con una guía de uso y configuración sufi
 - De la fase anterior: go test en Windows para config/tunnel pasó; go vet Linux pasó; builds Linux AMD64/ARM64 pasaron; tests SSH/PTY/SFTP Linux compilaron pero todavía no se ejecutaron en Linux real.
 - La integración nativa con Kaggle Secrets se probó con mocks HTTP, NO con una notebook Kaggle real.
 - Evitar contraseñas en notebook o repositorio; rotar contraseñas antiguas que aparecieran en texto plano.
-- El SSH de Kaggle escucha en loopback; el puerto expuesto por VPS se mantiene privado por defecto.
+- SSH de Kaggle escucha en loopback interno; el puerto del VPS se solicita en 0.0.0.0.
 - El VPS todavía necesita un servidor SSH que acepte forward inverso.
 
 # Pendientes para la siguiente sesión

@@ -53,7 +53,6 @@ Abre **Add-ons → Secrets** en la notebook y crea **una etiqueta (Label) y valo
 | `SSH_PORT_REMOTE` | `22` | Puerto del daemon SSH del VPS |
 | `SSH_PORT_KAGGLE` | `2223` | Puerto publicado en el VPS |
 | `SSH_PORT_LOCAL` | `2224` | Puerto interno de Kaggle |
-| `SSH_REMOTE_BIND` | `127.0.0.1` | Puerto remoto accesible solo desde el VPS (recomendado) |
 
 Los cuatro últimos ajustes de puertos/bind pueden omitirse cuando te sirven sus valores predeterminados. También puedes usar `SSH_KEY` (ruta a clave privada) en lugar de `SSH_PASSWORD`, o `SSH_AUTHORIZED_KEYS` (ruta a archivo de claves públicas) en lugar de `SSH_LOGIN_PASSWORD`.
 
@@ -65,16 +64,9 @@ Desde un acceso confiable al VPS, obtén/verifica su huella de host, por ejemplo
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
 ```
 
-**Celda para iniciar sin exports ni Python que lea Secrets:**
+**Arranque recomendado:** ejecuta la celda **run** del [notebook actualizado](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb). La celda permanece **ejecutándose**, muestra en tiempo real los logs del proceso Go y se detiene con el botón **Detener/Interruptar** de Kaggle. El código atiende la interrupción y termina el proceso de forma controlada. No crea tareas en segundo plano ni requiere una celda STOP.
 
-```python
-%%bash
-set -e
-chmod +x /kaggle/working/kagssh-linux-amd64
-exec /kaggle/working/kagssh-linux-amd64
-```
-
-El binario intenta obtener por HTTPS cada Secret con su etiqueta mediante el token `KAGGLE_USER_SECRETS_TOKEN` suministrado por Kaggle. La API en vivo aún necesita comprobación. La celda permanecerá ocupada mientras se mantenga conectado el túnel; detener la celda o terminar Kaggle corta el proceso.
+El binario obtiene los Secrets por HTTPS usando el token suministrado por Kaggle. La API de Secrets en vivo aún necesita comprobación. Si Kaggle detiene la sesión, el túnel se pierde.
 
 ## 4. Alternativa: todas las variables en la celda
 
@@ -91,9 +83,8 @@ export SSH_PASSWORD="PASSWORD_PRIVADA_VPS"
 export SSH_FINGERPRINT="SHA256:HUELLA_VERIFICADA"
 export SSH_PORT_REMOTE="22"
 
-# Puerto de retorno en el VPS
+# Puerto de retorno público en el VPS
 export SSH_PORT_KAGGLE="2223"
-export SSH_REMOTE_BIND="127.0.0.1"
 
 # Servidor SSH embebido de Kaggle
 export SSH_PORT_LOCAL="2224"
@@ -114,7 +105,6 @@ Puedes guardar todas las contraseñas en Kaggle Secrets y cambiar solo una confi
 %%bash
 set -e
 export SSH_PORT_KAGGLE="3333"
-export SSH_REMOTE_BIND="127.0.0.1"
 chmod +x /kaggle/working/kagssh-linux-amd64
 exec /kaggle/working/kagssh-linux-amd64
 ```
@@ -129,7 +119,7 @@ Si no hay token de Secrets se usan exports/defaults. Si el servicio de Secrets d
 
 | Variable | Valor predeterminado | Significado |
 |---|---|---|
-| `SSH_HOST` | `fp.thowilabs.com` | Host del VPS; puedes sobreescribirlo |
+| `SSH_HOST` | **obligatorio** | IP pública o dominio del VPS |
 | `SSH_USER` | `root` | Usuario SSH de salida al VPS |
 | `SSH_PASSWORD` | vacío | Password del VPS |
 | `SSH_KEY` | vacío | **Ruta a archivo** de clave privada para acceder al VPS |
@@ -138,7 +128,6 @@ Si no hay token de Secrets se usan exports/defaults. Si el servicio de Secrets d
 | `SSH_PORT_REMOTE` | `22` | Puerto SSH real del VPS |
 | `SSH_PORT_KAGGLE` | `2223` | Puerto publicado por el túnel en VPS |
 | `SSH_PORT_LOCAL` | `2224` | Puerto del SSH local en Kaggle |
-| `SSH_REMOTE_BIND` | `127.0.0.1` | IP de escucha del VPS; `0.0.0.0` permite acceso público si el VPS lo acepta |
 | `SSH_LOGIN_USER` | usuario Linux del proceso | Identidad admitida en el SSH integrado |
 | `SSH_LOGIN_PASSWORD` | vacío | Password para entrar a Kaggle |
 | `SSH_AUTHORIZED_KEYS` | vacío | **Ruta a archivo** con claves públicas para acceder a Kaggle |
@@ -150,39 +139,18 @@ Se exige alguna autenticación para **ambos lados**: `SSH_PASSWORD` o `SSH_KEY` 
 
 ## 7. Acceso desde tu computadora
 
-### Forma segura: puerto remoto privado
+KagSSH siempre solicita publicar el túnel en **`0.0.0.0:2223` en el VPS**, no en localhost. Puedes cambiar el número de puerto con `SSH_PORT_KAGGLE`, pero no se necesita ningún Secret de bind.
 
-Con `SSH_REMOTE_BIND=127.0.0.1`, el puerto 2223 solo escucha en el VPS. Abre una terminal de tu computadora (no en Kaggle):
+**Configura OpenSSH en el VPS** con `AllowTcpForwarding yes` y `GatewayPorts clientspecified` (o `yes`). Abre TCP/2223 en el firewall del VPS y del proveedor. Si GatewayPorts está deshabilitado, el VPS puede publicar el túnel solamente en localhost aunque el cliente solicite una dirección pública.
 
-```bash
-ssh -N -L 2223:127.0.0.1:2223 -p 22 usuario_vps@mi-vps.example.com
-```
-
-Mantén esa terminal abierta. En **una segunda terminal** de tu computadora:
+Desde tu computadora, directamente:
 
 ```bash
-ssh -p 2223 usuario_kaggle@127.0.0.1
-sftp -P 2223 usuario_kaggle@127.0.0.1
+ssh -p 2223 usuario_kaggle@IP_PUBLICA_DEL_VPS
+sftp -P 2223 usuario_kaggle@IP_PUBLICA_DEL_VPS
 ```
 
-Usa `SSH_LOGIN_USER` para el segundo comando. Si cambiaste `SSH_PORT_KAGGLE` o `SSH_PORT_REMOTE`, adapta los puertos. Si el puerto local 2223 de tu PC está ocupado, elige otro solo para el lado izquierdo de `-L` y úsalo en el segundo comando.
-
-### Acceso público directo (opcional, no recomendado de entrada)
-
-Si deseas llegar a Kaggle directamente a través del VPS:
-
-- Define `SSH_REMOTE_BIND=0.0.0.0`.
-- Habilita en el servidor SSH del VPS `AllowTcpForwarding yes` y `GatewayPorts clientspecified`, según las reglas de su instalación.
-- Abre el puerto publicado, por ejemplo TCP 2223, en el firewall del VPS.
-
-Después, desde tu computadora:
-
-```bash
-ssh -p 2223 usuario_kaggle@mi-vps.example.com
-sftp -P 2223 usuario_kaggle@mi-vps.example.com
-```
-
-**Seguridad:** publicar el puerto expone la autenticación SSH integrada de Kaggle a Internet. Mantén acceso privado siempre que puedas; usa contraseñas diferentes, preferentemente claves, y restringe el firewall.
+Utiliza el valor de `SSH_LOGIN_USER` para el usuario y tu IP pública real para el servidor. Restringe los orígenes permitidos en el firewall y usa autenticación fuerte porque este puerto SSH queda accesible desde Internet.
 
 ## 8. Validación y solución de problemas
 
@@ -205,7 +173,7 @@ Resultado esperado: **configuración válida**. Esto **no** prueba que el SSH de
 | Password obligatoria ausente | Crear el Secret individual o definir export |
 | Huella SSH del VPS no coincide | Comprobar huella real desde canal seguro; no desactivar validación |
 | Error al publicar puerto remoto | VPS con SSH, Forwarding habilitado, puerto libre y permisos |
-| Llega desde VPS pero no desde PC | Con bind loopback, usar el túnel local de la sección 7 |
+| Llega desde localhost del VPS pero no desde PC | Revisar GatewayPorts y firewall TCP/2223 en el VPS |
 | Bind público no recibe conexiones | GatewayPorts, firewall, IP/dominio y puerto |
 | Sin shell/PTY | Shell Linux instalada y permisos del usuario que ejecutó KagSSH |
 | Desconexión al detener la notebook | Esperado: KagSSH necesita sesión activa |
@@ -235,7 +203,7 @@ Para el build alternativo Linux ARM64, cambia `GOARCH` a `arm64` y salida a `dis
 
 - No compartas passwords, tokens o claves privadas dentro del repositorio, logs o notebook público; rota claves/contraseñas que se hayan expuesto previamente.
 - Si se proporciona una huella del VPS, se verifica estrictamente. De lo contrario se usa una clave ya guardada o se registra la primera clave recibida (TOFU), sin validación independiente de ese primer contacto. Cualquier cambio posterior se rechaza.
-- SSH de Kaggle escucha solo en loopback; el puerto de salida remoto también es privado por defecto.
+- SSH de Kaggle escucha solo en loopback interno; el puerto del VPS se solicita en 0.0.0.0 y queda expuesto si GatewayPorts y firewall lo permiten.
 - Se filtran variables `SSH_*` y `KAGGLE_*` del entorno de las shells lanzadas por SSH integrado, pero no se pueden deshacer secretos ya copiados a notebooks.
 - La clave de host de Kaggle persiste solamente si su ruta de almacenamiento sobrevive la sesión; si se recrea, la huella SSH del entorno podría cambiar.
 - Pruebas existentes: `go test ./...` (config/túnel) pasado en Windows, `go vet` cruzado a Linux pasado, builds Linux AMD64/ARM64 estáticos completados, pruebas SSH Linux compiladas pero no ejecutadas.

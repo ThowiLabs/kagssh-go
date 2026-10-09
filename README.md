@@ -26,7 +26,7 @@ Configura al menos:
 
 | Secret / variable | Ejemplo | Significado |
 |---|---|---|
-| `SSH_HOST` | `fp.thowilabs.com` | Host del VPS |
+| `SSH_HOST` | **obligatorio** | IP pública o dominio del VPS |
 | `SSH_USER` | `root` | Usuario SSH del VPS |
 | `SSH_PASSWORD` | (valor privado) | Contraseña SSH del VPS; alternativa: `SSH_KEY` |
 | `SSH_LOGIN_PASSWORD` | (valor privado diferente) | Contraseña para conectarse al SSH incorporado en Kaggle; alternativa: `SSH_AUTHORIZED_KEYS` |
@@ -39,7 +39,6 @@ Puedes añadir estas etiquetas para cambiar los puertos y comportamiento:
 | `SSH_PORT_REMOTE` | `22` | **Puerto del SSH real del VPS** para establecer el túnel saliente |
 | `SSH_PORT_KAGGLE` | `2223` | **Puerto publicado en el VPS** para entrar a Kaggle |
 | `SSH_PORT_LOCAL` | `2224` | Puerto interno donde escucha el SSH embebido en Kaggle |
-| `SSH_REMOTE_BIND` | `127.0.0.1` | IP de escucha en VPS; `0.0.0.0` habilita acceso público |
 | `SSH_LOGIN_USER` | usuario Linux del proceso | Usuario admitido por el SSH de Kaggle |
 | `SSH_KEY` | vacío | Ruta a clave privada SSH del VPS, si no usas contraseña |
 | `SSH_KNOWN_HOSTS` | `~/.ssh/known_hosts` | Archivo alternativo de claves confiables del VPS |
@@ -50,16 +49,9 @@ Puedes añadir estas etiquetas para cambiar los puertos y comportamiento:
 
 **Prioridad:** variable de entorno declarada explícitamente → Kaggle Secret con la misma etiqueta → valor predeterminado. Si se encuentra un token Kaggle pero el servicio falla por autenticación/red/rate limit, el arranque falla explicando qué etiqueta falló; si no existe token Kaggle, funciona solo con `export`. Si falta una contraseña o clave obligatoria se muestra un error sin revelar valores.
 
-### Ejecutar en Kaggle sin configurar variables en la celda
+### Ejecutar KagSSH y detenerlo desde Kaggle
 
-Tras compilar con el notebook recomendado (o subir manualmente un binario actualizado) en `/kaggle/working/`:
-
-```bash
-!chmod +x /kaggle/working/kagssh-linux-amd64
-!/kaggle/working/kagssh-linux-amd64
-```
-
-O ejecuta el mismo binario desde una celda `%%bash`. Permanecerá en primer plano mostrando logs. STOP detiene el proceso y cierra el túnel. El binario es Go puro; el notebook usa su interfaz habitual para lanzar ejecutables.
+Ejecuta la celda **run** del [notebook actualizado](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb): permanece **activa** mientras funciona KagSSH, muestra stdout/stderr de Go directamente en su salida y permite pulsar el botón **Detener/Interruptar** de Kaggle para cerrar el túnel. No se usa segundo plano, visor de logs ni celda STOP separada.
 
 ### Ejecutar en otro servidor con export
 
@@ -88,30 +80,23 @@ PC --ssh--> VPS:2223 --reverse forward--> Kaggle:127.0.0.1:2224
 
 Este proyecto elimina OpenSSH **en Kaggle**. El VPS sigue necesitando un servidor SSH escuchando en `SSH_PORT_REMOTE` (normalmente 22).
 
-Por defecto, el puerto remoto 2223 solo acepta conexiones **desde el mismo VPS** porque `SSH_REMOTE_BIND=127.0.0.1`. Para entrar desde Internet, debes guardar `SSH_REMOTE_BIND=0.0.0.0` como Secret; además, el VPS requiere:
+KagSSH solicita **siempre `0.0.0.0:2223` en el VPS**. El bind público ya no es un parámetro configurable. El servidor OpenSSH del VPS debe permitir:
 
 ```text
 AllowTcpForwarding yes
 GatewayPorts clientspecified
 ```
 
-y permitir TCP/2223 en el firewall. Exponer SSH a Internet requiere autenticación fuerte; recomendamos claves autorizadas y protección adicional.
+También sirve `GatewayPorts yes`. Activa el puerto TCP/2223 en el firewall y, si aplica, en el panel de tu proveedor. Con `GatewayPorts no`, el VPS puede limitar la escucha a localhost aunque KagSSH solicite `0.0.0.0`.
 
-Para dejarlo privado, realiza desde tu PC un túnel hasta el VPS y después accede a Kaggle:
-
-```bash
-ssh -N -L 2223:127.0.0.1:2223 root@fp.thowilabs.com
-ssh -p 2223 root@127.0.0.1
-```
-
-Para acceso público (si lo habilitas):
+Para entrar **directamente** desde tu PC con el usuario `SSH_LOGIN_USER` de Kaggle:
 
 ```bash
-ssh -p 2223 root@fp.thowilabs.com
-sftp -P 2223 root@fp.thowilabs.com
+ssh -p 2223 usuario_kaggle@IP_PUBLICA_DEL_VPS
+sftp -P 2223 usuario_kaggle@IP_PUBLICA_DEL_VPS
 ```
 
-Sustituye `root` por `SSH_LOGIN_USER` si usas otro usuario en Kaggle.
+**Seguridad:** el acceso SSH de Kaggle quedará expuesto a Internet. Usa claves SSH o contraseñas robustas e independientes, y limita las IP de origen en el firewall.
 
 ## Instalación/compilación
 
@@ -146,7 +131,7 @@ GitHub Actions realiza pruebas Linux de SSH, PTY y SFTP usando localhost. Las pr
 - Límites de conexiones y reintentos de autenticación.
 - No implementa X11, agent forwarding ni port forwarding arbitrario hacia otros destinos.
 - Cada arranque hace una consulta por cada etiqueta que no esté exportada, con timeout. Kaggle puede aplicar límites de API. No vuelve a consultar Secrets durante la reconexión.
-- El servidor SSH embebido escucha únicamente en 127.0.0.1. Para almacenamiento persistente de host keys usa `SSH_HOST_KEY`.
+- El SSH embebido escucha únicamente en el loopback **interno de Kaggle** (`127.0.0.1:2224`), distinto del puerto **público del VPS** solicitado en `0.0.0.0`. Para almacenar claves de host persistentes usa `SSH_HOST_KEY`.
 
 ### Verificar la huella confiable del VPS
 
