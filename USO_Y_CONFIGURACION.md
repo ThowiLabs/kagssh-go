@@ -20,7 +20,7 @@ PC ──SSH──> VPS:2223 ──forward inverso──> Kaggle:127.0.0.1:2224
 
 ## 2. Antes de comenzar
 
-Necesitas un notebook de Kaggle con Internet para contactar con el VPS; tu VPS debe tener servidor SSH en funcionamiento, autorizar TCP reverse forwarding y disponer de las credenciales y la huella del host previamente verificada.
+Necesitas un notebook de Kaggle con Internet y un VPS propio con servidor SSH en funcionamiento que permita TCP reverse forwarding. KagSSH crea automáticamente el servidor SSH dentro de Kaggle y prepara su registro de claves del VPS si falta. Para autenticar la identidad del VPS con seguridad desde la primera conexión, usa una huella obtenida por un canal de confianza.
 
 **Forma recomendada:** abre el [notebook de instalación y conexión](notebooks/kagssh_kaggle_chatgpt_agentes.ipynb) en Kaggle. Este clona `https://github.com/ThowiLabs/kagssh-go`, comprueba la versión requerida en `go.mod`, descarga **Go desde go.dev con verificación SHA-256** si hace falta, y compila el binario como `/kaggle/working/kagssh-linux-amd64`. Requiere Internet y no necesita adjuntar un ejecutable ni escribir Secrets en las celdas.
 
@@ -49,13 +49,15 @@ Abre **Add-ons → Secrets** en la notebook y crea **una etiqueta (Label) y valo
 | `SSH_PASSWORD` | contraseña privada del VPS | Autenticación de la conexión saliente al VPS |
 | `SSH_LOGIN_USER` | `usuario_kaggle` | Usuario admitido por el SSH integrado de Kaggle |
 | `SSH_LOGIN_PASSWORD` | **otra** contraseña privada | Contraseña para entrar a Kaggle |
-| `SSH_FINGERPRINT` | `SHA256:HUELLA_VERIFICADA` | Huella confiable de la clave SSH del VPS |
+| `SSH_FINGERPRINT` | `SHA256:HUELLA_VERIFICADA` | **Opcional y más seguro:** huella verificada de la clave SSH del VPS |
 | `SSH_PORT_REMOTE` | `22` | Puerto del daemon SSH del VPS |
 | `SSH_PORT_KAGGLE` | `2223` | Puerto publicado en el VPS |
 | `SSH_PORT_LOCAL` | `2224` | Puerto interno de Kaggle |
 | `SSH_REMOTE_BIND` | `127.0.0.1` | Puerto remoto accesible solo desde el VPS (recomendado) |
 
 Los cuatro últimos ajustes de puertos/bind pueden omitirse cuando te sirven sus valores predeterminados. También puedes usar `SSH_KEY` (ruta a clave privada) en lugar de `SSH_PASSWORD`, o `SSH_AUTHORIZED_KEYS` (ruta a archivo de claves públicas) en lugar de `SSH_LOGIN_PASSWORD`.
+
+**No necesitas instalar OpenSSH en Kaggle ni crear `~/.ssh/known_hosts`.** El binario incorpora su propio servidor SSH y el cliente para el VPS. Si no hay huella fijada ni archivo de confianza, KagSSH crea automáticamente el archivo y recuerda la primera clave pública que presente el VPS, mostrando una advertencia con su huella; en las siguientes conexiones rechaza claves diferentes. Esta primera aceptación automática no comprueba por un canal independiente que sea realmente tu VPS (riesgo de suplantación durante el primer contacto). Para seguridad máxima, introduce una huella del VPS verificada como `SSH_FINGERPRINT`.
 
 Desde un acceso confiable al VPS, obtén/verifica su huella de host, por ejemplo:
 
@@ -142,7 +144,7 @@ Si no hay token de Secrets se usan exports/defaults. Si el servicio de Secrets d
 | `SSH_AUTHORIZED_KEYS` | vacío | **Ruta a archivo** con claves públicas para acceder a Kaggle |
 | `SSH_HOST_KEY` | HOME + `/.config/kagssh/host_ed25519` | Ruta a clave Ed25519 del servidor integrado, que se crea si falta |
 
-Se exige alguna autenticación para **ambos lados**: `SSH_PASSWORD` o `SSH_KEY` hacia el VPS; `SSH_LOGIN_PASSWORD` o `SSH_AUTHORIZED_KEYS` para entrar a Kaggle. Para verificar el VPS usa `SSH_FINGERPRINT` o un archivo de `SSH_KNOWN_HOSTS` existente y válido.
+Se exige alguna autenticación para **ambos lados**: `SSH_PASSWORD` o `SSH_KEY` hacia el VPS; `SSH_LOGIN_PASSWORD` o `SSH_AUTHORIZED_KEYS` para entrar a Kaggle. Para identificar al VPS usa `SSH_FINGERPRINT` si está definida. Si no, KagSSH usa el archivo `SSH_KNOWN_HOSTS`, o lo crea automáticamente al primer contacto (TOFU); esa primera clave no está validada externamente, por lo que conviene comprobar su huella después por un canal seguro.
 
 **Los valores de SSH_KEY y SSH_AUTHORIZED_KEYS son rutas de archivos**, no texto PEM ni texto de claves. La versión actual no convierte automáticamente el contenido de un Secret en un archivo de claves. El nombre `SSH_LOGIN_USER` es una identidad SSH, **no cambia al usuario Unix**: la shell remota utiliza los permisos del proceso KagSSH Go.
 
@@ -232,7 +234,7 @@ Para el build alternativo Linux ARM64, cambia `GOARCH` a `arm64` y salida a `dis
 ## 10. Seguridad y pendientes
 
 - No compartas passwords, tokens o claves privadas dentro del repositorio, logs o notebook público; rota claves/contraseñas que se hayan expuesto previamente.
-- La huella del VPS se verifica: no hay modo previsto para saltarla.
+- Si se proporciona una huella del VPS, se verifica estrictamente. De lo contrario se usa una clave ya guardada o se registra la primera clave recibida (TOFU), sin validación independiente de ese primer contacto. Cualquier cambio posterior se rechaza.
 - SSH de Kaggle escucha solo en loopback; el puerto de salida remoto también es privado por defecto.
 - Se filtran variables `SSH_*` y `KAGGLE_*` del entorno de las shells lanzadas por SSH integrado, pero no se pueden deshacer secretos ya copiados a notebooks.
 - La clave de host de Kaggle persiste solamente si su ruta de almacenamiento sobrevive la sesión; si se recrea, la huella SSH del entorno podría cambiar.

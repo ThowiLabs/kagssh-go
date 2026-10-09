@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ThowiLabs/kagssh-go/internal/config"
@@ -178,11 +180,54 @@ func hostCallback(cfg config.Config) (ssh.HostKeyCallback, error) {
 		}, nil
 	}
 	if cfg.VPSKnownHosts == "" {
-		return nil, errors.New("no se configuró known_hosts")
+		return nil, errors.New("configura SSH_FINGERPRINT o SSH_KNOWN_HOSTS")
 	}
-	callback, err := knownhosts.New(cfg.VPSKnownHosts)
-	if err != nil {
-		return nil, fmt.Errorf("known_hosts del VPS: %w", err)
-	}
-	return callback, nil
+	// Inicialización automática: si no hay una huella ya verificada o una clave
+	// previa del VPS, registra la primera que llegue (TOFU). Esta primera
+	// conexión NO tiene autenticación independiente del servidor: quien controle
+	// la red en ese instante podría suplantar el VPS. Las posteriores sí
+	// comprueban la clave guardada; si cambia, rechazan el acceso.
+	// No depende de OpenSSH ni ssh-keyscan dentro de Kaggle.
+	var mu sync.Mutex
+	expected := net.JoinHostPort(cfg.VPSHost, strconv.Itoa(cfg.VPSPort))
+	return func(host string, remote net.Addr, key ssh.PublicKey) error {
+		if host != expected {
+			return fmt.Errorf("host SSH inesperado %q (esperado %q)", host, expected)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+
+		callback, err := knownhosts.New(cfg.VPSKnownHosts)
+		if err == nil {
+			if verifyErr := callback(host, remote, key); verifyErr == nil {
+				return nil
+			} else {
+				var mismatch *knownhosts.KeyError
+				if !errors.As(verifyErr, &mismatch) || len(mismatch.Want) != 0 {
+					return fmt.Errorf("la identidad SSH del VPS cambió o known_hosts no es válido: %w", verifyErr)
+				}
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("leer known_hosts del VPS: %w", err)
+		}
+
+		if err := os.MkdirAll(filepath.Dir(cfg.VPSKnownHosts), 0700); err != nil {
+			return fmt.Errorf("crear directorio de confianza SSH: %w", err)
+		}
+		file, err := os.OpenFile(cfg.VPSKnownHosts, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			return fmt.Errorf("crear known_hosts del VPS: %w", err)
+		}
+		line := knownhosts.Line([]string{knownhosts.Normalize(host)}, key)
+		_, writeErr := file.WriteString("\n" + line + "\n")
+		closeErr := file.Close()
+		if writeErr != nil {
+			return fmt.Errorf("guardar identidad SSH del VPS: %w", writeErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("cerrar known_hosts del VPS: %w", closeErr)
+		}
+		fmt.Fprintf(os.Stderr, "ADVERTENCIA: primera conexión SSH a %s: clave del VPS registrada automáticamente en %s (huella %s). No fue validada externamente; comprueba esta huella por un canal seguro. Cambios posteriores se rechazarán.\n", expected, cfg.VPSKnownHosts, ssh.FingerprintSHA256(key))
+		return nil
+	}, nil
 }

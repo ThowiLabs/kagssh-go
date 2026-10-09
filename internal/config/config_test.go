@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestValidate(t *testing.T) {
 	base := Config{
 		Listen: "127.0.0.1:2224", LoginUser: "root", LoginPassword: "local",
 		VPSHost: "example.org", VPSUser: "root", VPSPassword: "remote", VPSPort: 22,
-		VPSKnownHosts: "known_hosts", RemoteBind: "127.0.0.1", RemotePort: 2223,
+		VPSFingerprint: "SHA256:verificada", RemoteBind: "127.0.0.1", RemotePort: 2223,
 	}
 	tests := []struct {
 		name   string
@@ -40,6 +41,14 @@ func TestValidate(t *testing.T) {
 		{"escucha inválida", func(c *Config) { c.Listen = "2224" }, "SSH_PORT_LOCAL"},
 		{"bind remoto no permitido", func(c *Config) { c.RemoteBind = "8.8.8.8" }, "SSH_REMOTE_BIND"},
 		{"puerto inválido", func(c *Config) { c.RemotePort = 0 }, "puerto"},
+		{"known_hosts ausente se inicializará", func(c *Config) {
+			c.VPSFingerprint = ""
+			c.VPSKnownHosts = filepath.Join(t.TempDir(), "known_hosts")
+		}, ""},
+		{"ruta de confianza vacía se rechaza", func(c *Config) {
+			c.VPSFingerprint = ""
+			c.VPSKnownHosts = ""
+		}, "SSH_KNOWN_HOSTS"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -100,7 +109,7 @@ func TestLoad_ExportSobrescribeSecret(t *testing.T) {
 }
 
 func TestLoad_DefaultsSinKaggle(t *testing.T) {
-	values := map[string]string{"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local"}
+	values := map[string]string{"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local", "SSH_FINGERPRINT": "SHA256:verificada"}
 	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -122,5 +131,32 @@ func TestLoad_ErroresEnSecretYValidacion(t *testing.T) {
 				t.Fatalf("puerto inválido %q: %v", port, err)
 			}
 		})
+	}
+}
+
+func TestLoad_AutoKnownHostsSinNuevaVariable(t *testing.T) {
+	values := map[string]string{
+		"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local",
+		"SSH_KNOWN_HOSTS": filepath.Join(t.TempDir(), ".ssh", "known_hosts"),
+	}
+	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
+	if err != nil {
+		t.Fatalf("sin fingerprint y sin archivo debe iniciar para registrar la primera clave: %v", err)
+	}
+	if cfg.VPSFingerprint != "" || cfg.VPSKnownHosts != values["SSH_KNOWN_HOSTS"] {
+		t.Fatalf("configuración de confianza inesperada: %#v", cfg.VPSKnownHosts)
+	}
+}
+
+func TestLoad_RutaKnownHostsPredeterminada(t *testing.T) {
+	values := map[string]string{
+		"SSH_PASSWORD": "remota", "SSH_LOGIN_PASSWORD": "local",
+	}
+	cfg, err := Load(context.Background(), func(k string) (string, bool) { v, ok := values[k]; return v, ok }, nil)
+	if err != nil {
+		t.Fatalf("debe funcionar sin crear manualmente known_hosts: %v", err)
+	}
+	if cfg.VPSKnownHosts == "" {
+		t.Fatal("no definió la ubicación predeterminada de known_hosts")
 	}
 }

@@ -30,7 +30,7 @@ Configura al menos:
 | `SSH_USER` | `root` | Usuario SSH del VPS |
 | `SSH_PASSWORD` | (valor privado) | Contraseña SSH del VPS; alternativa: `SSH_KEY` |
 | `SSH_LOGIN_PASSWORD` | (valor privado diferente) | Contraseña para conectarse al SSH incorporado en Kaggle; alternativa: `SSH_AUTHORIZED_KEYS` |
-| `SSH_FINGERPRINT` | `SHA256:...` | Huella *verificada* del SSH del VPS; también puede usarse `SSH_KNOWN_HOSTS` |
+| `SSH_FINGERPRINT` | `SHA256:...` | **Opcional pero más seguro:** huella verificada del VPS. Sin ella, KagSSH registra automáticamente la primera clave recibida en `known_hosts` |
 
 Puedes añadir estas etiquetas para cambiar los puertos y comportamiento:
 
@@ -46,7 +46,7 @@ Puedes añadir estas etiquetas para cambiar los puertos y comportamiento:
 | `SSH_AUTHORIZED_KEYS` | vacío | Ruta a las claves públicas permitidas en el servidor integrado |
 | `SSH_HOST_KEY` | `~/.config/kagssh/host_ed25519` | Ruta persistente de la identidad Ed25519 del servidor de Kaggle |
 
-**Estas etiquetas son idénticas a las variables `export`**. No hay prefijo propio, Secret JSON, servicio auxiliar ni archivo obligatorio de configuración.
+**Estas etiquetas son idénticas a las variables `export`**. No hay prefijo propio, Secret JSON, servicio auxiliar ni archivo obligatorio de configuración. **No necesitas habilitar ningún modo adicional ni crear `known_hosts` a mano.** Si no defines `SSH_FINGERPRINT`, KagSSH crea el archivo y guarda automáticamente la primera clave pública que entregue el VPS, sin depender de OpenSSH dentro de Kaggle. Comprueba la huella registrada por otro canal seguro: la primera conexión no puede garantizar la identidad del VPS frente a un posible intermediario. Una vez registrada, las conexiones posteriores rechazan cambios de clave.
 
 **Prioridad:** variable de entorno declarada explícitamente → Kaggle Secret con la misma etiqueta → valor predeterminado. Si se encuentra un token Kaggle pero el servicio falla por autenticación/red/rate limit, el arranque falla explicando qué etiqueta falló; si no existe token Kaggle, funciona solo con `export`. Si falta una contraseña o clave obligatoria se muestra un error sin revelar valores.
 
@@ -115,7 +115,7 @@ Sustituye `root` por `SSH_LOGIN_USER` si usas otro usuario en Kaggle.
 
 ## Instalación/compilación
 
-Desde el proyecto, con Go 1.26.6 o superior:
+Desde el proyecto, con Go 1.26.9 o superior:
 
 ```powershell
 $env:CGO_ENABLED="0"
@@ -140,7 +140,7 @@ GitHub Actions realiza pruebas Linux de SSH, PTY y SFTP usando localhost. Las pr
 
 - Las variables `SSH_*` y los tokens `KAGGLE_*` no se transmiten al entorno de las shells iniciadas por el servidor integrado.
 - La clave de host Ed25519 se crea con permisos 0600 y se reutiliza.
-- El cliente verifica la huella o known_hosts del VPS; no permite deshabilitar esa verificación.
+- El cliente verifica la huella explícita, si existe. Sin ella, registra la primera clave del VPS automáticamente (**TOFU**), advierte que aún no ha sido verificada externamente y rechaza cambios posteriores. Para máxima protección contra un ataque en el primer contacto, configura `SSH_FINGERPRINT` verificada.
 - No modifica la contraseña del usuario root del sistema.
 - El usuario indicado por `SSH_LOGIN_USER` es una identidad SSH: la shell hereda los permisos del **proceso**, no cambia de cuenta Linux automáticamente. Evita ejecutarlo como root salvo necesidad.
 - Límites de conexiones y reintentos de autenticación.

@@ -139,7 +139,14 @@ func (c Config) Validate() error {
 		return errors.New("SSH_USER inválido")
 	}
 	if c.VPSFingerprint == "" && c.VPSKnownHosts == "" {
-		return errors.New("falta verificación de host VPS")
+		return errors.New("SSH_KNOWN_HOSTS o SSH_FINGERPRINT debe tener una ruta/huella; se configura ruta predeterminada automáticamente")
+	}
+	if c.VPSFingerprint == "" {
+		if info, err := os.Stat(c.VPSKnownHosts); err == nil && info.IsDir() {
+			return errors.New("SSH_KNOWN_HOSTS debe ser un archivo, no un directorio")
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("comprobar known_hosts del VPS: %w", err)
+		}
 	}
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return fmt.Errorf("SSH_PORT_LOCAL inválido: %w", err)
